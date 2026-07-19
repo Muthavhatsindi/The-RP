@@ -1,7 +1,9 @@
 import os
 import uuid
+import gzip
+import base64
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -34,7 +36,7 @@ def get_pm_client():
     return AzureDevOpsClient(settings)
 
 
-az_client = get_pm_client()
+pm_client = get_pm_client()
 
 # Schemas
 class MeetingCreate(BaseModel):
@@ -54,7 +56,7 @@ class ItemUpdate(BaseModel):
 class ItemUpdateList(BaseModel):
     items: List[ItemUpdate]
 
-class PushToAzureRequest(BaseModel):
+class PushToPlatformRequest(BaseModel):
     iteration_path: Optional[str] = None
 
 class RetroFeedbackSubmit(BaseModel):
@@ -80,9 +82,14 @@ class SettingsUpdate(BaseModel):
     jira_api_token: Optional[str] = None
     jira_project_key: Optional[str] = None
 
+
+class FrameworkUploadRequest(BaseModel):
+    filename: str
+    content: str
+
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "mock_mode": az_client.mock_mode}
+    return {"status": "ok", "mock_mode": pm_client.mock_mode}
 
 # Meetings & Backlog Generation Routes
 @app.get("/api/meetings")
@@ -139,7 +146,7 @@ async def create_meeting(payload: MeetingCreate):
             priority=int(item.get("priority", 3)),
             approved=False,  # Starts as unapproved
             tags=item.get("tags", []),
-            azure_id=None
+            platform_id=None
         )
         
     return {
@@ -185,7 +192,7 @@ def update_meeting_items(meeting_id: str, payload: ItemUpdateList):
     # Check if there are approved items still waiting to be pushed
     items = db.get_items_by_meeting(meeting_id)
     any_approved = any(i["approved"] == 1 for i in items)
-    any_unpushed_approved = any(i["approved"] == 1 and not i["azure_id"] for i in items)
+    any_unpushed_approved = any(i["approved"] == 1 and not i.get("platform_id") for i in items)
     
     if any_unpushed_approved:
         db.update_meeting_status(meeting_id, "pending_push")
@@ -196,16 +203,15 @@ def update_meeting_items(meeting_id: str, payload: ItemUpdateList):
         
     return {"status": "ok", "items": results}
 
-@app.post("/api/meetings/{meeting_id}/push-to-azure")
 @app.post("/api/meetings/{meeting_id}/push-to-platform")
-async def push_to_azure(meeting_id: str, payload: PushToAzureRequest):
+async def push_meeting_items_to_platform(meeting_id: str, payload: PushToPlatformRequest):
     meeting = db.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
         
     items = db.get_items_by_meeting(meeting_id)
     # Find active items that are approved but not yet pushed
-    targets = [i for i in items if i["approved"] == 1 and not i["azure_id"]]
+    targets = [i for i in items if i["approved"] == 1 and not i.get("platform_id")]
     
     if not targets:
         return {"message": "No approved, un-pushed items found.", "pushed_count": 0, "results": []}
@@ -222,23 +228,23 @@ async def push_to_azure(meeting_id: str, payload: PushToAzureRequest):
                 "tags": item["tags"]
             }
             
-            # Send to Azure DevOps
-            res = await az_client.create_work_item(
+            # Send to the selected PM platform
+            res = await pm_client.create_work_item(
                 item_type=item["type"],
                 item_data=item_data,
                 iteration_path=payload.iteration_path
             )
             
-            azure_id = str(res.get("id"))
-            db.set_item_azure_id(item["id"], azure_id)
-            pushed_results.append({"item_id": item["id"], "azure_id": azure_id})
+            platform_id = str(res.get("key") or res.get("id"))
+            db.set_item_platform_id(item["id"], platform_id)
+            pushed_results.append({"item_id": item["id"], "platform_id": platform_id})
         except Exception as e:
-            print(f"[PUSH ERROR] Failed to push item {item['id']} to Azure: {str(e)}")
+            print(f"[PUSH ERROR] Failed to push item {item['id']} to the selected PM platform: {str(e)}")
             pushed_results.append({"item_id": item["id"], "error": str(e)})
 
     # Recalculate status
     updated_items = db.get_items_by_meeting(meeting_id)
-    any_unpushed_approved = any(i["approved"] == 1 and not i["azure_id"] for i in updated_items)
+    any_unpushed_approved = any(i["approved"] == 1 and not i.get("platform_id") for i in updated_items)
     
     if any_unpushed_approved:
         db.update_meeting_status(meeting_id, "pending_push")
@@ -247,7 +253,7 @@ async def push_to_azure(meeting_id: str, payload: PushToAzureRequest):
         
     return {
         "message": "Pushed approved items to the selected project management platform",
-        "pushed_count": len([r for r in pushed_results if "azure_id" in r]),
+        "pushed_count": len([r for r in pushed_results if "platform_id" in r]),
         "results": pushed_results
     }
 
@@ -255,19 +261,21 @@ async def push_to_azure(meeting_id: str, payload: PushToAzureRequest):
 @app.get("/api/sprints")
 async def get_sprints():
     try:
-        sprints = await az_client.get_active_sprints()
+        sprints = await pm_client.get_active_sprints()
         return sprints
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[SPRINTS WARNING] Failed to fetch sprints from the selected PM platform: {str(e)}")
+        return []
 
 @app.get("/api/sprints/{sprint_id}/workitems")
 async def get_sprint_work_items(sprint_id: str, path: str):
     try:
         # Fetch actual items using the path
-        items = await az_client.get_sprint_work_items(iteration_path=path)
+        items = await pm_client.get_sprint_work_items(iteration_path=path)
         return items
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[SPRINT WORK ITEMS WARNING] Failed to fetch sprint work items for '{path}': {str(e)}")
+        return []
 
 # Retro intelligence Flow Routes
 @app.post("/api/retro/{sprint_id}/feedback")
@@ -303,16 +311,40 @@ def get_settings():
 @app.put("/api/settings")
 def update_settings(payload: SettingsUpdate):
     try:
-        global az_client
+        global pm_client
         # Convert payload to dict and save
         settings_data = payload.dict(exclude_unset=True)
         saved = db.save_settings(settings_data)
         
-        # Reinitialize Azure DevOps client if project platform settings changed
+        # Reinitialize the selected project management client if integration settings changed
         if any(k in settings_data for k in ["project_platform", "azure_org", "azure_project", "azure_pat", "jira_url", "jira_email", "jira_api_token", "jira_project_key"]):
-            az_client = get_pm_client()
+            pm_client = get_pm_client()
         
         return saved
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/framework")
+def upload_framework(payload: FrameworkUploadRequest):
+    try:
+        compressed = gzip.compress(payload.content.encode("utf-8"))
+        encoded = base64.b64encode(compressed).decode("utf-8")
+        return db.save_settings({
+            "framework_filename": payload.filename,
+            "framework_content_gzip": encoded
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/settings/framework")
+def clear_framework():
+    try:
+        return db.save_settings({
+            "framework_filename": None,
+            "framework_content_gzip": None
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -320,7 +352,7 @@ def update_settings(payload: SettingsUpdate):
 async def aggregate_retro_report(sprint_id: str, path: str, payload: RetroAggregateRequest = RetroAggregateRequest()):
     try:
         # Fetch current items in that sprint from the selected PM platform
-        sprint_items = await az_client.get_sprint_work_items(iteration_path=path)
+        sprint_items = await pm_client.get_sprint_work_items(iteration_path=path)
         
         # Load local comments/survey entries
         feedback_list = db.get_retro_feedback_for_sprint(sprint_id)
@@ -368,13 +400,10 @@ async def aggregate_retro_report(sprint_id: str, path: str, payload: RetroAggreg
 @app.get("/api/retro/{sprint_id}/report")
 def get_retro_report(sprint_id: str):
     report = db.get_retro_report(sprint_id)
-    if not report:
-        raise HTTPException(status_code=404, detail="Retro report not generated yet for this sprint.")
     return report
 
-@app.post("/api/retro/{sprint_id}/push-actions-to-azure")
 @app.post("/api/retro/{sprint_id}/push-actions-to-platform")
-async def push_retro_actions(sprint_id: str, payload: PushToAzureRequest):
+async def push_retro_actions_to_platform(sprint_id: str, payload: PushToPlatformRequest):
     report = db.get_retro_report(sprint_id)
     if not report:
         raise HTTPException(status_code=404, detail="No retro report found.")
@@ -394,7 +423,7 @@ async def push_retro_actions(sprint_id: str, payload: PushToAzureRequest):
                 "priority": action.get("priority", 2),
                 "tags": (action.get("tags", []) if isinstance(action.get("tags"), list) else []) + ["retro-action"]
             }
-            res = await az_client.create_work_item(
+            res = await pm_client.create_work_item(
                 item_type=action.get("type", "task"),
                 item_data=item_data,
                 iteration_path=payload.iteration_path

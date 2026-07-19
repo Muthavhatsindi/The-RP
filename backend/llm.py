@@ -18,8 +18,22 @@ def get_llm_config():
         "ollama_base_url": settings.get("ollama_base_url", "http://localhost:11434"),
         "openai_api_key": settings.get("openai_api_key", ""),
         "openai_base_url": settings.get("openai_base_url", "https://api.openai.com/v1"),
-        "azure_project": settings.get("azure_project") or settings.get("jira_project_key") or "MockProject"
+        "azure_project": settings.get("azure_project") or settings.get("jira_project_key") or "MockProject",
+        "framework_context": settings.get("framework_content") or ""
     }
+
+
+def build_framework_context() -> str:
+    config = get_llm_config()
+    framework_context = (config.get("framework_context") or "").strip()
+    if not framework_context:
+        return ""
+    return (
+        "\nCompany Framework Context:\n"
+        "Use the following company-specific framework/policy when categorizing, scoring, "
+        "writing, or aligning work items. Prefer it over generic defaults when relevant.\n"
+        f"{framework_context[:12000]}\n"
+    )
 
 def clean_json_string(text: str) -> str:
     """Extracts JSON substring or parses loose formatting from the LLM output."""
@@ -185,7 +199,7 @@ async def extract_items(transcript: str) -> List[Dict[str, Any]]:
         "  ]\n"
         "}\n"
         "Write clear, actionable descriptions. Ensure output is strict valid JSON with camelCase fields."
-    )
+    ) + build_framework_context()
     user_prompt = f"Transcript:\n{transcript}"
     
     try:
@@ -239,7 +253,7 @@ async def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         '  ]\n'
         "}}\n"
         "Ensure output is valid JSON."
-    )
+    ) + build_framework_context()
     user_prompt = f"Backlog Items:\n{json.dumps(items, indent=2)}"
     response_text = await call_llm(system_prompt, user_prompt, json_format=True)
     try:
@@ -291,7 +305,7 @@ async def align_company_framework(items: List[Dict[str, Any]]) -> List[Dict[str,
         "  ]\n"
         "}}\n"
         "Ensure response is valid JSON."
-    )
+    ) + build_framework_context()
     user_prompt = f"Existing backlogs to align:\n{json.dumps(items, indent=2)}"
     response_text = await call_llm(system_prompt, user_prompt, json_format=True)
     try:

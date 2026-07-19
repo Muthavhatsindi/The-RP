@@ -31,13 +31,17 @@ class AzureDevOpsClient:
         self.project = self.project if self.project not in ("", "your_project_name") else ""
         self.pat = self.pat if self.pat not in ("", "your_personal_access_token_here") else ""
         
-        # If a non-Azure platform is selected, keep the client in mock mode so the
-        # rest of the app still works without trying to call Azure endpoints.
-        self.mock_mode = platform != "azure" or not (self.org and self.project and self.pat)
+        self.mock_mode = not (self.org and self.project and self.pat)
         if self.mock_mode:
-            print("[AZURE DEVOPS] Operating in MOCK MODE because organization/project/PAT variables are not fully configured.")
+            print("[AZURE DEVOPS] Integration is not fully configured. Real Azure Boards requests are disabled until organization/project/PAT are saved.")
         else:
             print(f"[AZURE DEVOPS] Initialized client for Org: {self.org}, Project: {self.project}")
+
+    def _ensure_configured(self):
+        if self.mock_mode:
+            raise RuntimeError(
+                "Azure Boards integration is not fully configured. Save organization, project, and PAT in Settings."
+            )
 
     def _get_headers(self, is_patch: bool = False) -> Dict[str, str]:
         pat_encoded = base64.b64encode(f":{self.pat}".encode("utf-8")).decode("utf-8")
@@ -59,19 +63,7 @@ class AzureDevOpsClient:
         elif item_type == "task":
             mapped_type = TASK_TYPE
         
-        if self.mock_mode:
-            import uuid
-            import random
-            return {
-                "id": str(random.randint(1000, 9999)),
-                "fields": {
-                    "System.Id": str(random.randint(1000, 9999)),
-                    "System.Title": item_data["title"],
-                    "System.WorkItemType": mapped_type,
-                    "System.State": "New",
-                    "System.Description": item_data.get("description", "")
-                }
-            }
+        self._ensure_configured()
 
         # Build Patch request
         patch = [
@@ -108,12 +100,7 @@ class AzureDevOpsClient:
     async def get_active_sprints(self) -> List[Dict[str, Any]]:
         """Retrieves list of iteration paths (sprints) for the configured project."""
         if self.mock_mode:
-            # Return template mockup sprints
-            return [
-                {"id": "sprint-1", "name": "Sprint 1", "path": f"{self.project or 'MockProject'}\\Sprint 1", "timeFrame": "past"},
-                {"id": "sprint-2", "name": "Sprint 2", "path": f"{self.project or 'MockProject'}\\Sprint 2", "timeFrame": "current"},
-                {"id": "sprint-3", "name": "Sprint 3", "path": f"{self.project or 'MockProject'}\\Sprint 3", "timeFrame": "future"}
-            ]
+            return []
 
         # Note: Iterations are managed per Team. We fetch the project iterations list.
         # Azure DevOps has a project-level classification nodes endpoint:
@@ -144,13 +131,6 @@ class AzureDevOpsClient:
                             
                 parse_nodes(data)
                 
-                # If classification nodes was empty, fallback to a standard team settings query
-                if not sprints:
-                    # Let's get via default team (we default to {project}-Team if needed, or query teams list first)
-                    # For simplicity, if classification iterations are empty we create a few placeholders
-                    sprints = [
-                        {"id": "sprint-fallback-1", "name": "Sprint 1", "path": f"{self.project}\\Sprint 1", "timeFrame": "current"}
-                    ]
                 return sprints
         except Exception as e:
             print(f"[AZURE DEVOPS ERROR] Failed to fetch project classification iterations: {str(e)}")
@@ -175,52 +155,12 @@ class AzureDevOpsClient:
             except Exception as ex:
                 print(f"[AZURE DEVOPS ERROR] Double fallback failed: {str(ex)}")
             
-            return [
-                {"id": "sprint-default", "name": "Active Sprint", "path": f"{self.project}\\Sprint 1", "timeFrame": "current"}
-            ]
+            return []
 
     async def get_sprint_work_items(self, iteration_path: str) -> List[Dict[str, Any]]:
         """Queries work items inside a specific iteration path using WIQL."""
         if self.mock_mode:
-            # Return mock items inside iteration
-            import random
-            return [
-                {
-                    "id": "201",
-                    "title": "Setup client authentication pipeline",
-                    "type": FEATURE_TYPE,
-                    "state": "Closed",
-                    "story_points": 8
-                },
-                {
-                    "id": "202",
-                    "title": "As a developer, I want to deploy to staging, so that I can verify code integrations.",
-                    "type": STORY_TYPE,
-                    "state": "Closed",
-                    "story_points": 5
-                },
-                {
-                    "id": "203",
-                    "title": "As an admin, I want to config LLM endpoints in settings, so that I can use offline Ollama.",
-                    "type": STORY_TYPE,
-                    "state": "Active",
-                    "story_points": 3
-                },
-                {
-                    "id": "204",
-                    "title": "Create PostgreSQL table indices",
-                    "type": TASK_TYPE,
-                    "state": "New",
-                    "story_points": 1
-                },
-                {
-                    "id": "205",
-                    "title": "Fix authentication endpoint CORS exception",
-                    "type": "Bug",
-                    "state": "Active",
-                    "story_points": 2
-                }
-            ]
+            return []
 
         # WIQL API endpoint
         url = f"https://dev.azure.com/{self.org}/{self.project}/_apis/wit/wiql?api-version={self.api_version}"

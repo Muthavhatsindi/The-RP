@@ -1,8 +1,10 @@
 import os
 import json
+import gzip
+import base64
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, Text, DateTime, ForeignKey, JSON, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.sql import func
 from dotenv import load_dotenv
@@ -79,6 +81,8 @@ class Settings(Base):
     jira_email = Column(String, nullable=True)
     jira_api_token = Column(String, nullable=True)
     jira_project_key = Column(String, nullable=True)
+    framework_filename = Column(String, nullable=True)
+    framework_content_gzip = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 class RetroReport(Base):
@@ -98,10 +102,30 @@ class RetroReport(Base):
 # Database Manager Helper Class
 class Database:
     def __init__(self):
+        self._framework_cache_raw: Optional[str] = None
+        self._framework_cache_text: Optional[str] = None
         self.init_db()
 
     def init_db(self):
         Base.metadata.create_all(bind=engine)
+        self._run_migrations()
+
+    def _run_migrations(self):
+        inspector = inspect(engine)
+        if "settings" not in inspector.get_table_names():
+            return
+
+        existing_columns = {col["name"] for col in inspector.get_columns("settings")}
+        alter_statements = []
+        if "framework_filename" not in existing_columns:
+            alter_statements.append("ALTER TABLE settings ADD COLUMN framework_filename VARCHAR")
+        if "framework_content_gzip" not in existing_columns:
+            alter_statements.append("ALTER TABLE settings ADD COLUMN framework_content_gzip TEXT")
+
+        if alter_statements:
+            with engine.begin() as conn:
+                for stmt in alter_statements:
+                    conn.execute(text(stmt))
 
     def get_session(self):
         return SessionLocal()
@@ -147,7 +171,7 @@ class Database:
     def create_item(self, id: str, meeting_id: str, type: str, title: str, description: str, 
                     acceptance_criteria: List[str], story_points: int, priority: int, 
                     approved: bool = False, tags: Optional[List[str]] = None, 
-                    azure_id: Optional[str] = None) -> Dict[str, Any]:
+                    platform_id: Optional[str] = None) -> Dict[str, Any]:
         with self.get_session() as session:
             db_item = BacklogItem(
                 id=id,
@@ -160,7 +184,7 @@ class Database:
                 priority=priority,
                 approved=approved,
                 tags=tags or [],
-                azure_id=azure_id
+                azure_id=platform_id
             )
             session.add(db_item)
             session.commit()
@@ -193,10 +217,13 @@ class Database:
             session.commit()
             return self.get_item(id)
 
-    def set_item_azure_id(self, id: str, azure_id: str):
+    def set_item_platform_id(self, id: str, platform_id: str):
         with self.get_session() as session:
-            session.query(BacklogItem).filter(BacklogItem.id == id).update({"azure_id": azure_id})
+            session.query(BacklogItem).filter(BacklogItem.id == id).update({"azure_id": platform_id})
             session.commit()
+
+    def set_item_azure_id(self, id: str, azure_id: str):
+        self.set_item_platform_id(id, azure_id)
 
     # Retro Feedback Operations
     def add_retro_feedback(self, id: str, sprint_id: str, user_id: str, answers: Dict[str, Any], sentiment: float):
@@ -277,6 +304,7 @@ class Database:
             "priority": item.priority,
             "approved": 1 if item.approved else 0,
             "tags": item.tags if isinstance(item.tags, list) else json.loads(item.tags or "[]"),
+            "platform_id": item.azure_id,
             "azure_id": item.azure_id,
             "created_at": item.created_at.isoformat() if item.created_at else None
         }
@@ -350,26 +378,48 @@ class Database:
                 settings.jira_api_token = settings_data["jira_api_token"]
             if "jira_project_key" in settings_data:
                 settings.jira_project_key = settings_data["jira_project_key"]
+            if "framework_filename" in settings_data:
+                settings.framework_filename = settings_data["framework_filename"]
+            if "framework_content_gzip" in settings_data:
+                settings.framework_content_gzip = settings_data["framework_content_gzip"]
                 
             session.commit()
             session.refresh(settings)
             return self._to_settings_dict(settings)
 
     def _to_settings_dict(self, s: Settings) -> Dict[str, Any]:
+        framework_content = self._decompress_framework_content(s.framework_content_gzip)
         return {
             "id": s.id,
-            "llm_provider": s.llm_provider,
-            "llm_model": s.llm_model,
-            "ollama_base_url": s.ollama_base_url,
-            "openai_api_key": s.openai_api_key,
-            "openai_base_url": s.openai_base_url,
+            "llm_provider": s.llm_provider or os.getenv("LLM_PROVIDER", "ollama"),
+            "llm_model": s.llm_model or os.getenv("LLM_MODEL", "llama3.1:8b"),
+            "ollama_base_url": s.ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "openai_api_key": s.openai_api_key or os.getenv("OPENAI_API_KEY"),
+            "openai_base_url": s.openai_base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             "project_platform": s.project_platform,
-            "azure_org": s.azure_org,
-            "azure_project": s.azure_project,
-            "azure_pat": s.azure_pat,
-            "jira_url": s.jira_url,
-            "jira_email": s.jira_email,
-            "jira_api_token": s.jira_api_token,
-            "jira_project_key": s.jira_project_key,
+            "azure_org": s.azure_org or os.getenv("AZURE_ORGANIZATION"),
+            "azure_project": s.azure_project or os.getenv("AZURE_PROJECT"),
+            "azure_pat": s.azure_pat or os.getenv("AZURE_PAT"),
+            "jira_url": s.jira_url or os.getenv("JIRA_URL"),
+            "jira_email": s.jira_email or os.getenv("JIRA_EMAIL"),
+            "jira_api_token": s.jira_api_token or os.getenv("JIRA_API_TOKEN"),
+            "jira_project_key": s.jira_project_key or os.getenv("JIRA_PROJECT_KEY"),
+            "framework_filename": s.framework_filename,
+            "framework_uploaded": bool(s.framework_content_gzip),
+            "framework_content": framework_content,
             "updated_at": s.updated_at.isoformat() if s.updated_at else None
         }
+
+    def _decompress_framework_content(self, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        if value == self._framework_cache_raw:
+            return self._framework_cache_text
+        try:
+            raw = base64.b64decode(value.encode("utf-8"))
+            text_value = gzip.decompress(raw).decode("utf-8")
+            self._framework_cache_raw = value
+            self._framework_cache_text = text_value
+            return text_value
+        except Exception:
+            return None

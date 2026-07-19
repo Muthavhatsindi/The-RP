@@ -14,7 +14,7 @@ interface BacklogItem {
   priority: number;
   approved: number;
   tags: string[];
-  azure_id: string | null;
+  platform_id: string | null;
 }
 
 interface Meeting {
@@ -66,6 +66,9 @@ interface Settings {
   jira_email?: string;
   jira_api_token?: string;
   jira_project_key?: string;
+  framework_filename?: string | null;
+  framework_uploaded?: boolean;
+  framework_content?: string | null;
 }
 
 // Preset Transcript Samples
@@ -113,9 +116,10 @@ export default function App() {
   const [editPriority, setEditPriority] = useState(3);
   const [editTags, setEditTags] = useState('');
 
-  // Azure DevOps Configurations
+  // Project Management Configurations
   const [sprints, setSprints] = useState<Sprint[]>([]);
-  const [selectedSprint, setSelectedSprint] = useState<string>('');
+  const [selectedPlanningSprintId, setSelectedPlanningSprintId] = useState<string>('');
+  const [selectedRetroSprintId, setSelectedRetroSprintId] = useState<string>('');
   const [isPushing, setIsPushing] = useState(false);
 
   // Retro Page State
@@ -131,6 +135,7 @@ export default function App() {
   // Settings State
   const [settings, setSettings] = useState<Settings | null>(null);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isUploadingFramework, setIsUploadingFramework] = useState(false);
 
   // Fetch initial list on load
   useEffect(() => {
@@ -146,11 +151,15 @@ export default function App() {
   }, [selectedMeetingId]);
 
   useEffect(() => {
-    if (selectedSprint) {
+    if (selectedRetroSprintId) {
       fetchSprintItems();
       fetchExistingRetroReport();
+    } else {
+      setSprintItems([]);
+      setRetroReport(null);
+      setAreActionsPushed(false);
     }
-  }, [selectedSprint]);
+  }, [selectedRetroSprintId, sprints]);
 
   const fetchSettings = async () => {
     try {
@@ -176,6 +185,11 @@ export default function App() {
         body: JSON.stringify(settings)
       });
       if (res.ok) {
+        const data = await res.json();
+        setSettings(data);
+        setSelectedPlanningSprintId('');
+        setSelectedRetroSprintId('');
+        await fetchSprints();
         alert("Settings saved successfully!");
       } else {
         alert("Failed to save settings.");
@@ -211,16 +225,41 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/sprints`);
       if (!res.ok) {
         console.error("Failed to fetch sprints:", res.statusText);
+        setSprints([]);
+        setSelectedPlanningSprintId('');
+        setSelectedRetroSprintId('');
+        setSprintItems([]);
+        setRetroReport(null);
+        setAreActionsPushed(false);
         return;
       }
       const data = await res.json();
       const sprintsData = Array.isArray(data) ? data : [];
       setSprints(sprintsData);
-      if (sprintsData.length > 0 && !selectedSprint) {
-        setSelectedSprint(sprintsData[0].id);
+      const selectedRetroStillExists = sprintsData.some(s => s.id === selectedRetroSprintId);
+      const selectedPlanningStillExists = sprintsData.some(s => s.id === selectedPlanningSprintId);
+
+      if (sprintsData.length > 0 && (!selectedRetroSprintId || !selectedRetroStillExists)) {
+        setSelectedRetroSprintId(sprintsData[0].id);
+      }
+      if (selectedPlanningSprintId && !selectedPlanningStillExists) {
+        setSelectedPlanningSprintId('');
+      }
+      if (sprintsData.length === 0) {
+        setSelectedPlanningSprintId('');
+        setSelectedRetroSprintId('');
+        setSprintItems([]);
+        setRetroReport(null);
+        setAreActionsPushed(false);
       }
     } catch (e) {
       console.error("Error fetching sprints:", e);
+      setSprints([]);
+      setSelectedPlanningSprintId('');
+      setSelectedRetroSprintId('');
+      setSprintItems([]);
+      setRetroReport(null);
+      setAreActionsPushed(false);
     }
   };
 
@@ -240,8 +279,11 @@ export default function App() {
   };
 
   const fetchSprintItems = async () => {
-    const sprint = sprints.find(s => s.id === selectedSprint);
-    if (!sprint) return;
+    const sprint = sprints.find(s => s.id === selectedRetroSprintId);
+    if (!sprint) {
+      setSprintItems([]);
+      return;
+    }
     try {
       const res = await fetch(`${API_URL}/api/sprints/${sprint.id}/workitems?path=${encodeURIComponent(sprint.path)}`);
       if (!res.ok) {
@@ -256,15 +298,18 @@ export default function App() {
   };
 
   const fetchExistingRetroReport = async () => {
-    const sprint = sprints.find(s => s.id === selectedSprint);
-    if (!sprint) return;
+    const sprint = sprints.find(s => s.id === selectedRetroSprintId);
+    if (!sprint) {
+      setRetroReport(null);
+      return;
+    }
     try {
       setRetroReport(null);
       setAreActionsPushed(false);
       const res = await fetch(`${API_URL}/api/retro/${sprint.id}/report`);
       if (res.ok) {
         const data = await res.json();
-        setRetroReport(data);
+        setRetroReport(data || null);
       }
     } catch (e) {
       console.log("Error fetching retro report:", e);
@@ -405,12 +450,12 @@ export default function App() {
     }
   };
 
-  // Pushing Approved Backlogs to Azure DevOps Boards
-  const handlePushToAzure = async () => {
+  // Push approved backlog items to the selected project management platform
+  const handlePushToPlatform = async () => {
     if (!selectedMeeting) return;
-    const targetSprint = sprints.find(s => s.id === selectedSprint);
+    const targetSprint = sprints.find(s => s.id === selectedPlanningSprintId);
     
-    const approvedCount = backlogItems.filter(i => i.approved === 1 && !i.azure_id).length;
+    const approvedCount = backlogItems.filter(i => i.approved === 1 && !i.platform_id).length;
     if (approvedCount === 0) {
       alert("No approved, un-pushed backlog items in this meeting. Use the checklist to approve items first.");
       return;
@@ -418,30 +463,41 @@ export default function App() {
     
     setIsPushing(true);
     try {
-      const res = await fetch(`${API_URL}/api/meetings/${selectedMeeting.id}/push-to-azure`, {
+      const res = await fetch(`${API_URL}/api/meetings/${selectedMeeting.id}/push-to-platform`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ iteration_path: targetSprint?.path || null })
       });
       const data = await res.json();
-      
-      alert(`Success: ${data.pushed_count} work items pushed to Azure Boards!`);
-      fetchMeetingDetail(selectedMeeting.id);
-      fetchMeetings();
+      if (!res.ok) {
+        throw new Error(data.detail || `Failed to push backlog items to ${platformLabel}.`);
+      }
+
+      const failedItems = Array.isArray(data.results) ? data.results.filter((result: any) => result.error) : [];
+      if (data.pushed_count === 0 && failedItems.length > 0) {
+        const firstError = failedItems[0]?.error || `Failed to push backlog items to ${platformLabel}.`;
+        throw new Error(firstError);
+      }
+
+      const assignmentLabel = targetSprint ? ` and assigned to ${targetSprint.name}` : " without assigning a sprint";
+      alert(`Success: ${data.pushed_count} work items pushed to ${platformLabel}${assignmentLabel}.`);
+      await fetchMeetingDetail(selectedMeeting.id);
+      await fetchMeetings();
     } catch (e) {
       console.error(e);
-      alert("Failed to push backlog items to Azure.");
+      alert(e instanceof Error ? e.message : `Failed to push backlog items to ${platformLabel}.`);
     } finally {
       setIsPushing(false);
     }
   };
 
+
   // Submit employee retro feedback script
   const submitRetroFeedback = async () => {
-    if (!selectedSprint) return;
+    if (!selectedRetroSprintId) return;
     setIsSubmittingFeedback(true);
     try {
-      const res = await fetch(`${API_URL}/api/retro/${selectedSprint}/feedback`, {
+      const res = await fetch(`${API_URL}/api/retro/${selectedRetroSprintId}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -466,7 +522,7 @@ export default function App() {
 
   // Generate sprint retro intelligence summary
   const generateRetroReport = async () => {
-    const sprint = sprints.find(s => s.id === selectedSprint);
+    const sprint = sprints.find(s => s.id === selectedRetroSprintId);
     if (!sprint) return;
     
     setIsAggregatingRetro(true);
@@ -486,27 +542,78 @@ export default function App() {
     }
   };
 
-  // Push LLM proposed action items from Retro to Azure Boards
-  const pushRetroActionsToAzure = async () => {
-    const sprint = sprints.find(s => s.id === selectedSprint);
+  // Push LLM proposed action items from Retro to the selected project management platform
+  const pushRetroActionsToPlatform = async () => {
+    const sprint = sprints.find(s => s.id === selectedRetroSprintId);
     if (!sprint || !retroReport) return;
     
     setIsPushing(true);
     try {
-      const res = await fetch(`${API_URL}/api/retro/${sprint.id}/push-actions-to-azure`, {
+      const res = await fetch(`${API_URL}/api/retro/${sprint.id}/push-actions-to-platform`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ iteration_path: sprint.path })
       });
       const data = await res.json();
-      alert(`Success: ${data.pushed_count} retro action items created on Azure Boards!`);
+      alert(`Success: ${data.pushed_count} retro action items created on ${platformLabel}!`);
       setAreActionsPushed(true);
-      fetchSprintItems();
+      await fetchSprintItems();
     } catch (e) {
       console.error(e);
-      alert("Failed to sync retro action items.");
+      alert(`Failed to sync retro action items to ${platformLabel}.`);
     } finally {
       setIsPushing(false);
+    }
+  };
+
+  const uploadFramework = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingFramework(true);
+    try {
+      const content = await file.text();
+      const res = await fetch(`${API_URL}/api/settings/framework`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, content })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to upload framework context.");
+      }
+
+      setSettings(data);
+      alert("Framework context uploaded and compressed successfully.");
+    } catch (e) {
+      console.error(e);
+      alert(e instanceof Error ? e.message : "Failed to upload framework context.");
+    } finally {
+      event.target.value = '';
+      setIsUploadingFramework(false);
+    }
+  };
+
+  const removeFramework = async () => {
+    setIsUploadingFramework(true);
+    try {
+      const res = await fetch(`${API_URL}/api/settings/framework`, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to remove framework context.");
+      }
+
+      setSettings(data);
+      alert("Framework context removed.");
+    } catch (e) {
+      console.error(e);
+      alert(e instanceof Error ? e.message : "Failed to remove framework context.");
+    } finally {
+      setIsUploadingFramework(false);
     }
   };
 
@@ -524,6 +631,7 @@ export default function App() {
   const completedCount = completedItems.length;
   const completionRate = sprintItems.length > 0 ? Math.round((completedCount / sprintItems.length) * 100) : 0;
   const platformLabel = settings?.project_platform === 'jira' ? 'Jira' : 'Azure Boards';
+  const hasSprints = sprints.length > 0;
 
   return (
     <div className="app-container">
@@ -602,11 +710,11 @@ export default function App() {
               </div>
               
               <div className="form-group">
-                <label className="form-label">Project Key</label>
+                <label className="form-label">Context Label (Optional)</label>
                 <input 
                   type="text" 
                   className="form-input" 
-                  placeholder="e.g., MyProject" 
+                  placeholder="e.g., Team Alpha, Checkout Stream" 
                   value={newProjectKey}
                   onChange={(e) => setNewProjectKey(e.target.value)}
                 />
@@ -716,9 +824,10 @@ export default function App() {
                       <select 
                         className="form-select" 
                         style={{ width: 'auto', padding: '6px 10px' }}
-                        value={selectedSprint}
-                        onChange={(e) => setSelectedSprint(e.target.value)}
+                        value={selectedPlanningSprintId}
+                        onChange={(e) => setSelectedPlanningSprintId(e.target.value)}
                       >
+                        <option value="">No Sprint / Backlog</option>
                         {sprints.map(s => (
                           <option key={s.id} value={s.id}>{s.name} ({s.timeFrame === 'current' ? 'Active' : s.timeFrame})</option>
                         ))}
@@ -726,7 +835,7 @@ export default function App() {
                       
                       <button 
                         className="btn btn-primary"
-                        onClick={handlePushToAzure}
+                        onClick={handlePushToPlatform}
                         disabled={isPushing}
                       >
                         {isPushing ? "Syncing..." : `Sync Approved to ${platformLabel}`}
@@ -744,7 +853,7 @@ export default function App() {
                             type="checkbox" 
                             className="backlog-checkbox"
                             checked={item.approved === 1}
-                            disabled={!!item.azure_id}
+                            disabled={!!item.platform_id}
                             onChange={() => handleToggleApprove(item.id, item.approved)}
                           />
                           
@@ -754,12 +863,12 @@ export default function App() {
                                 <span className={`type-indicator type-${item.type}`}>{item.type}</span>
                                 <h4 className="backlog-title">{item.title}</h4>
                               </div>
-                              {item.azure_id ? (
+                              {item.platform_id ? (
                                 <div className="azure-badge">
                                   <svg fill="currentColor" viewBox="0 0 24 24">
                                     <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
                                   </svg>
-                                  Azure ID: {item.azure_id}
+                                  {platformLabel} Ref: {item.platform_id}
                                 </div>
                               ) : (
                                 <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '0.8rem' }} onClick={() => startEditItem(item)}>
@@ -814,7 +923,7 @@ export default function App() {
           <div className="panel-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
             <div>
               <h2 style={{ fontSize: '1.25rem', marginBottom: '4px' }}>Sprint Retrospective Analyzer</h2>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem' }}>Sync real-time Azure sprint work items logs with individual sentiment reports.</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem' }}>Combine real sprint work item data with individual sentiment reports and coding-agent logs.</p>
             </div>
             
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -822,9 +931,10 @@ export default function App() {
               <select 
                 className="form-select" 
                 style={{ width: '220px' }}
-                value={selectedSprint}
-                onChange={(e) => setSelectedSprint(e.target.value)}
+                value={selectedRetroSprintId}
+                onChange={(e) => setSelectedRetroSprintId(e.target.value)}
               >
+                {!hasSprints && <option value="">No active sprints found</option>}
                 {sprints.map(s => (
                   <option key={s.id} value={s.id}>{s.name} ({s.timeFrame === 'current' ? 'Active' : s.timeFrame})</option>
                 ))}
@@ -928,7 +1038,7 @@ export default function App() {
                   className="btn btn-secondary" 
                   style={{ width: '100%' }}
                   onClick={submitRetroFeedback}
-                  disabled={isSubmittingFeedback}
+                  disabled={isSubmittingFeedback || !selectedRetroSprintId}
                 >
                   {isSubmittingFeedback ? "Submitting..." : "Submit Stress Questionnaire"}
                 </button>
@@ -943,7 +1053,7 @@ export default function App() {
                   className="btn btn-primary" 
                   style={{ padding: '6px 12px', fontSize: '0.85rem' }}
                   onClick={generateRetroReport}
-                  disabled={isAggregatingRetro}
+                  disabled={isAggregatingRetro || !selectedRetroSprintId}
                 >
                   {isAggregatingRetro ? "Synthesizing..." : "Generate Retro Report"}
                 </button>
@@ -1001,7 +1111,7 @@ export default function App() {
                         <button 
                           className="btn btn-success" 
                           style={{ padding: '4px 10px', fontSize: '0.8rem' }}
-                          onClick={pushRetroActionsToAzure}
+                          onClick={pushRetroActionsToPlatform}
                         >
                           {`Sync Actions to ${platformLabel}`}
                         </button>
@@ -1133,6 +1243,52 @@ export default function App() {
           </div>
 
           <div className="panel-card" style={{ maxWidth: '800px', margin: '0 auto' }}>
+            <h3 className="panel-title">Framework Context Upload</h3>
+            {settings && (
+              <>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+                  Upload an optional company framework, delivery policy, taxonomy, or scoring guide. The backend compresses it for storage and keeps the decompressed context available for backlog extraction, scoring, and categorization.
+                </p>
+                <div className="form-group">
+                  <label className="form-label">Framework File</label>
+                  <input
+                    type="file"
+                    className="form-input"
+                    accept=".txt,.md,.json,.csv,.yml,.yaml,.xml"
+                    onChange={uploadFramework}
+                    disabled={isUploadingFramework}
+                  />
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.88rem' }}>
+                    {settings.framework_uploaded
+                      ? `Uploaded: ${settings.framework_filename || 'Framework file'}`
+                      : "No framework uploaded."}
+                  </div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={removeFramework}
+                    disabled={isUploadingFramework || !settings.framework_uploaded}
+                  >
+                    {isUploadingFramework ? "Working..." : "Remove Framework"}
+                  </button>
+                </div>
+                {settings.framework_content && (
+                  <div className="form-group" style={{ marginTop: '1rem' }}>
+                    <label className="form-label">Current Framework Preview</label>
+                    <textarea
+                      className="form-textarea"
+                      style={{ minHeight: '180px' }}
+                      value={settings.framework_content}
+                      readOnly
+                    />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="panel-card" style={{ maxWidth: '800px', margin: '0 auto' }}>
             <h3 className="panel-title">Project Management Integration</h3>
             {settings && (
               <>
@@ -1143,8 +1299,8 @@ export default function App() {
                     value={settings.project_platform}
                     onChange={(e) => setSettings({ ...settings, project_platform: e.target.value })}
                   >
-                    <option value="azure">Azure DevOps Boards</option>
-                    <option value="jira">Jira (Coming Soon)</option>
+                    <option value="azure">Azure Boards</option>
+                    <option value="jira">Jira</option>
                   </select>
                 </div>
 
@@ -1216,7 +1372,7 @@ export default function App() {
                       />
                     </div>
                     <div className="form-group">
-                      <label className="form-label">Jira Project Key</label>
+                      <label className="form-label">Default Jira Project Key</label>
                       <input 
                         type="text" 
                         className="form-input" 
@@ -1224,6 +1380,9 @@ export default function App() {
                         value={settings.jira_project_key || ''}
                         onChange={(e) => setSettings({ ...settings, jira_project_key: e.target.value })}
                       />
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginTop: '6px' }}>
+                        Jira issue creation needs a target project key. This is the default backlog project used when syncing approved items.
+                      </div>
                     </div>
                   </>
                 )}
