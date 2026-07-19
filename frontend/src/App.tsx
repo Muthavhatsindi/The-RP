@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 
 // API Base URL config
-const API_URL = 'http://127.0.0.1:8000';
+const API_URL = 'http://localhost:8000';
 
 interface BacklogItem {
   id: string;
@@ -83,6 +83,7 @@ export default function App() {
   
   // Create New Meeting Form
   const [newTitle, setNewTitle] = useState('');
+  const [newProjectKey, setNewProjectKey] = useState('');
   const [newTranscript, setNewTranscript] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisStep, setAnalysisStep] = useState(0);
@@ -131,37 +132,51 @@ export default function App() {
   const fetchMeetings = async () => {
     try {
       const res = await fetch(`${API_URL}/api/meetings`);
+      if (!res.ok) {
+        console.error("Failed to fetch meetings:", res.statusText);
+        return;
+      }
       const data = await res.json();
-      setMeetings(data);
-      if (data.length > 0 && !selectedMeetingId) {
-        setSelectedMeetingId(data[0].id);
+      const meetingsData = Array.isArray(data) ? data : [];
+      setMeetings(meetingsData);
+      if (meetingsData.length > 0 && !selectedMeetingId) {
+        setSelectedMeetingId(meetingsData[0].id);
       }
     } catch (e) {
-      console.error(e);
+      console.error("Error fetching meetings:", e);
     }
   };
 
   const fetchSprints = async () => {
     try {
       const res = await fetch(`${API_URL}/api/sprints`);
+      if (!res.ok) {
+        console.error("Failed to fetch sprints:", res.statusText);
+        return;
+      }
       const data = await res.json();
-      setSprints(data);
-      if (data.length > 0) {
-        setSelectedSprint(data[0].id);
+      const sprintsData = Array.isArray(data) ? data : [];
+      setSprints(sprintsData);
+      if (sprintsData.length > 0 && !selectedSprint) {
+        setSelectedSprint(sprintsData[0].id);
       }
     } catch (e) {
-      console.error(e);
+      console.error("Error fetching sprints:", e);
     }
   };
 
   const fetchMeetingDetail = async (id: string) => {
     try {
       const res = await fetch(`${API_URL}/api/meetings/${id}`);
+      if (!res.ok) {
+        console.error("Failed to fetch meeting detail:", res.statusText);
+        return;
+      }
       const data = await res.json();
       setSelectedMeeting(data);
-      setBacklogItems(data.items || []);
+      setBacklogItems(Array.isArray(data.items) ? data.items : []);
     } catch (e) {
-      console.error(e);
+      console.error("Error fetching meeting detail:", e);
     }
   };
 
@@ -170,10 +185,14 @@ export default function App() {
     if (!sprint) return;
     try {
       const res = await fetch(`${API_URL}/api/sprints/${sprint.id}/workitems?path=${encodeURIComponent(sprint.path)}`);
+      if (!res.ok) {
+        console.error("Failed to fetch sprint work items:", res.statusText);
+        return;
+      }
       const data = await res.json();
-      setSprintItems(data);
+      setSprintItems(Array.isArray(data) ? data : []);
     } catch (e) {
-      console.log(e);
+      console.log("Error fetching sprint items:", e);
     }
   };
 
@@ -186,10 +205,10 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/retro/${sprint.id}/report`);
       if (res.ok) {
         const data = await res.json();
-        setRetroReport(data.summary);
+        setRetroReport(data);
       }
     } catch (e) {
-      console.log(e);
+      console.log("Error fetching retro report:", e);
     }
   };
 
@@ -213,7 +232,7 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/meetings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ meetingTitle: newTitle, transcript: newTranscript })
+        body: JSON.stringify({ meetingTitle: newTitle, projectKey: newProjectKey, transcript: newTranscript })
       });
       const data = await res.json();
       
@@ -222,6 +241,7 @@ export default function App() {
       
       // Reset inputs
       setNewTitle('');
+      setNewProjectKey('');
       setNewTranscript('');
       
       // Refresh list & select the generated meeting
@@ -438,7 +458,7 @@ export default function App() {
   };
 
   // Helpers for Mock statistics calculations
-  const totalPoints = sprintItems.reduce((acc, curr) => acc + curr.story_points, 0);
+  const totalPoints = sprintItems.reduce((acc, curr) => acc + (Number(curr.story_points) || 0), 0);
   const completedItems = sprintItems.filter(i => i.state === 'Closed' || i.state === 'Done');
   const completedCount = completedItems.length;
   const completionRate = sprintItems.length > 0 ? Math.round((completedCount / sprintItems.length) * 100) : 0;
@@ -493,6 +513,7 @@ export default function App() {
                     style={{ padding: '4px 8px', fontSize: '0.75rem' }}
                     onClick={() => {
                       setNewTitle(s.title);
+                      setNewProjectKey('SampleProject');
                       setNewTranscript(s.transcript);
                     }}
                   >
@@ -509,6 +530,17 @@ export default function App() {
                   placeholder="Sprint 4 planning, etc." 
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
+                />
+              </div>
+              
+              <div className="form-group">
+                <label className="form-label">Project Key</label>
+                <input 
+                  type="text" 
+                  className="form-input" 
+                  placeholder="e.g., MyProject" 
+                  value={newProjectKey}
+                  onChange={(e) => setNewProjectKey(e.target.value)}
                 />
               </div>
               
@@ -581,11 +613,11 @@ export default function App() {
                   <div className="summary-split" style={{ marginTop: '1.25rem' }}>
                     <div className="bullet-card">
                       <h4>Key Decisions</h4>
-                      {selectedMeeting.decisions.length === 0 ? (
+                      {(selectedMeeting.decisions || []).length === 0 ? (
                         <p style={{ fontSize: '0.85rem' }}>No explicit decisions recorded.</p>
                       ) : (
                         <ul>
-                          {selectedMeeting.decisions.map((dec, i) => (
+                          {(selectedMeeting.decisions || []).map((dec, i) => (
                             <li key={i}>{dec}</li>
                           ))}
                         </ul>
@@ -594,11 +626,11 @@ export default function App() {
                     
                     <div className="bullet-card">
                       <h4>Assumptions & Risks</h4>
-                      {selectedMeeting.risks.length === 0 ? (
+                      {(selectedMeeting.risks || []).length === 0 ? (
                         <p style={{ fontSize: '0.85rem' }}>No risks resolved during discussion.</p>
                       ) : (
                         <ul>
-                          {selectedMeeting.risks.map((risk, i) => (
+                          {(selectedMeeting.risks || []).map((risk, i) => (
                             <li key={i}>{risk}</li>
                           ))}
                         </ul>
