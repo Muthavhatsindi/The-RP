@@ -1,0 +1,6 @@
+Plan.md
+.env
+*/.env
+*/__pycache__
+/.venv
+*/node_modules
