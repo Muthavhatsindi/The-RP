@@ -1,0 +1,5 @@
+{
+  "meetingTitle": "Test Meeting",
+  "projectKey": "TestProject",
+  "transcript": "Let's implement OAuth 2.0 and set up a CI/CD pipeline"
+}
