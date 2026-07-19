@@ -52,6 +52,27 @@ interface RetroReport {
   coding_agent_logs_summary?: string;
 }
 
+const normalizeRetroReport = (payload: any): RetroReport | null => {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  const toStringArray = (value: any): string[] => (
+    Array.isArray(value) ? value.map(item => String(item)) : []
+  );
+
+  return {
+    summary: String(payload.summary || ''),
+    what_went_well: toStringArray(payload.what_went_well ?? payload.wentWell),
+    what_did_not_go_well: toStringArray(payload.what_did_not_go_well ?? payload.didNotGoWell),
+    average_sentiment: Number(payload.average_sentiment ?? payload.averageSentiment ?? 0),
+    proposed_backlog_actions: Array.isArray(payload.proposed_backlog_actions ?? payload.actionItems)
+      ? (payload.proposed_backlog_actions ?? payload.actionItems)
+      : [],
+    coding_agent_logs_summary: payload.coding_agent_logs_summary ?? payload.codingAgentLogsSummary ?? ''
+  };
+};
+
 interface Settings {
   llm_provider: string;
   llm_model: string;
@@ -309,7 +330,7 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/retro/${sprint.id}/report`);
       if (res.ok) {
         const data = await res.json();
-        setRetroReport(data || null);
+        setRetroReport(normalizeRetroReport(data));
       }
     } catch (e) {
       console.log("Error fetching retro report:", e);
@@ -533,10 +554,20 @@ export default function App() {
         body: JSON.stringify({ coding_agent_logs: codingAgentLogs || null })
       });
       const data = await res.json();
-      setRetroReport(data);
+      if (!res.ok) {
+        throw new Error(data.detail || "Error building sprint retro summary.");
+      }
+
+      const normalizedReport = normalizeRetroReport(data);
+      if (!normalizedReport) {
+        throw new Error("Retro report returned no usable data.");
+      }
+
+      setAreActionsPushed(false);
+      setRetroReport(normalizedReport);
     } catch (e) {
       console.error(e);
-      alert("Error building sprint retro summary.");
+      alert(e instanceof Error ? e.message : "Error building sprint retro summary.");
     } finally {
       setIsAggregatingRetro(false);
     }
