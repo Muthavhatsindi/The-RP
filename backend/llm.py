@@ -12,10 +12,10 @@ LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+AZURE_PROJECT = os.getenv("AZURE_PROJECT", "MockProject")
 
 def clean_json_string(text: str) -> str:
     """Extracts JSON substring or parses loose formatting from the LLM output."""
-    # Find JSON blocks labeled with markdown
     match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE)
     if match:
         return match.group(1).strip()
@@ -23,7 +23,6 @@ def clean_json_string(text: str) -> str:
     if match_list:
         return match_list.group(1).strip()
     
-    # Otherwise try finding the outer-most { } or [ ]
     text_clean = text.strip()
     first_brace = text_clean.find("{")
     last_brace = text_clean.rfind("}")
@@ -84,7 +83,6 @@ async def call_llm(system_prompt: str, user_prompt: str, json_format: bool = Tru
                 
     except Exception as e:
         print(f"[LLM ERROR] Provider: {LLM_PROVIDER}, Error: {str(e)}")
-        # Provide a safe dummy structured response if LLM isn't reachable to keep flow running smoothly
         if json_format:
             return "{}"
         return "Failed to contact LLM provider."
@@ -127,19 +125,27 @@ async def extract_items(transcript: str) -> List[Dict[str, Any]]:
         '      "type": "story",\n'
         '      "title": "Short title describing item",\n'
         '      "description": "More detail about what was requested",\n'
-        '      "acceptance_criteria": ["Criteria 1", "Criteria 2"],\n'
+        '      "acceptanceCriteria": ["Criteria 1", "Criteria 2"],\n'
         '      "tags": ["frontend", "database"]\n'
         "    }\n"
         "  ]\n"
         "}\n"
-        "Write clear, actionable descriptions. Ensure output is strict valid JSON."
+        "Write clear, actionable descriptions. Ensure output is strict valid JSON with camelCase fields."
     )
     user_prompt = f"Transcript:\n{transcript}"
     response_text = await call_llm(system_prompt, user_prompt, json_format=True)
     try:
         clean = clean_json_string(response_text)
         data = json.loads(clean)
-        return data.get("items", [])
+        extracted = data.get("items", [])
+        
+        # Normalize fields: map acceptanceCriteria -> acceptance_criteria
+        for item in extracted:
+            if "acceptanceCriteria" in item:
+                item["acceptance_criteria"] = item["acceptanceCriteria"]
+            else:
+                item["acceptance_criteria"] = item.get("acceptance_criteria", [])
+        return extracted
     except Exception as e:
         print(f"[JSON Parse Error in extract_items]: {str(e)}")
         return []
@@ -149,38 +155,49 @@ async def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return []
         
     system_prompt = (
-        "You are an agile coach and estimation assistant. "
-        "Given a list of backlog items, assign Story Points (estimates of effort) and Priority (1 to 4, where 1 is highest priority).\n"
-        "Use standard Agile sizes for Story Points: 1, 2, 3, 5, 8, 13.\n"
-        "Provide your evaluation as a JSON list matching the input items list but appended with 'story_points' and 'priority' fields. "
+        "You are an agile estimation assistant. "
+        "Given a list of backlog items, assign Story Points (estimates of effort: 1, 2, 3, 5, 8, 13) "
+        "and Priority (1 to 4, where 1 is highest priority).\n"
+        f"Also, propose a 'proposedIterationPath' (default to '{AZURE_PROJECT}\\\\Sprint 1' or another sprint name context like "
+        f"'{AZURE_PROJECT}\\\\Sprint 2' if appropriate based on timing mentioned in the meeting).\n"
+        "Provide your evaluation as a JSON list matching the input items list but appended with points, priority, and proposedIterationPath. "
         "Example format:\n"
-        "{\n"
+        "{{\n"
         '  "items": [\n'
-        "    {\n"
+        "    {{\n"
         '      "type": "story",\n'
         '      "title": "Item title",\n'
         '      "description": "Item description",\n'
         '      "acceptance_criteria": ["criteria"],\n'
         '      "tags": ["tag"],\n'
         '      "story_points": 5,\n'
-        '      "priority": 2\n'
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        "Ensure the output strictly mirrors the input list schema and is valid JSON."
+        '      "priority": 2,\n'
+        f'      "proposedIterationPath": "{AZURE_PROJECT}\\\\Sprint 1"\n'
+        "    }}\n"
+        '  ]\n'
+        "}}\n"
+        "Ensure output is valid JSON."
     )
     user_prompt = f"Backlog Items:\n{json.dumps(items, indent=2)}"
     response_text = await call_llm(system_prompt, user_prompt, json_format=True)
     try:
         clean = clean_json_string(response_text)
         data = json.loads(clean)
-        return data.get("items", items)
+        scored = data.get("items", items)
+        
+        # Ensure proposedIterationPath is set
+        for item in scored:
+            item["story_points"] = item.get("story_points", 3)
+            item["priority"] = item.get("priority", 3)
+            if "proposedIterationPath" not in item:
+                item["proposedIterationPath"] = item.get("proposed_iteration_path", f"{AZURE_PROJECT}\\Sprint 1")
+        return scored
     except Exception as e:
         print(f"[JSON Parse Error in score_items]: {str(e)}")
-        # If scoring fails, inject default values
         for item in items:
             item["story_points"] = item.get("story_points", 3)
             item["priority"] = item.get("priority", 3)
+            item["proposedIterationPath"] = f"{AZURE_PROJECT}\\Sprint 1"
         return items
 
 async def align_company_framework(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -188,26 +205,27 @@ async def align_company_framework(items: List[Dict[str, Any]]) -> List[Dict[str,
         return []
         
     system_prompt = (
-        "You are an compliance and formatting expert. "
+        "You are a compliance and formatting expert. "
         "Review each item in the list and ensure it aligns with standard Agile best practices:\n"
         "- For 'story' items: Rephrase the description into a clear user format ('As a... I want to... So that...').\n"
         "- For 'task' and 'feature' items: Ensure title is action-oriented (starts with active verb like Develop, Implement, Refactor etc).\n"
         "Provide the updated list as a JSON response with key 'items'. "
         "Example structure:\n"
-        "{\n"
+        "{{\n"
         '  "items": [\n'
-        "    {\n"
+        "    {{\n"
         '      "type": "story",\n'
         '      "title": "Title",\n'
         '      "description": "As a developer, I want to..., so that...",\n'
         '      "acceptance_criteria": [...],\n'
         '      "tags": [...],\n'
         '      "story_points": 3,\n'
-        '      "priority": 2\n'
-        "    }\n"
+        '      "priority": 2,\n'
+        f'      "proposedIterationPath": "{AZURE_PROJECT}\\\\Sprint 1"\n'
+        "    }}\n"
         "  ]\n"
-        "}\n"
-        "Retain all existing properties from input, modifying only descriptions/titles where appropriate."
+        "}}\n"
+        "Ensure response is valid JSON."
     )
     user_prompt = f"Existing backlogs to align:\n{json.dumps(items, indent=2)}"
     response_text = await call_llm(system_prompt, user_prompt, json_format=True)
@@ -225,22 +243,22 @@ async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[
         "You will receive data about sprint completion statistics along with raw employee sentiment feedback.\n"
         "Analyze these datasets and output a JSON response containing standard retro sections:\n"
         "{\n"
-        '  "summary": "General summary of sprint execution and environment details",\n'
-        '  "what_went_well": ["Success item 1", "Success item 2"],\n'
-        '  "what_did_not_go_well": ["Friction item 1", "Friction item 2"],\n'
-        '  "average_sentiment": 4.2,\n'
-        '  "proposed_backlog_actions": [\n'
+        '  "wentWell": ["Success item 1", "Success item 2"],\n'
+        '  "didNotGoWell": ["Blocked item 1", "Blocked item 2"],\n'
+        '  "summary": "General summary of sprint performance",\n'
+        '  "averageSentiment": 4.0,\n'
+        '  "actionItems": [\n'
         "    {\n"
         '      "type": "task",\n'
         '      "title": "Proposed Action title (starts with verb)",\n'
-        '      "description": "Problem context and objective of this retro action item",\n'
+        '      "description": "Problem context and objective",\n'
         '      "story_points": 2,\n'
         '      "priority": 2,\n'
         '      "tags": ["retro-action", "technical-debt"]\n'
         "    }\n"
         "  ]\n"
         "}\n"
-        "Keep it highly analytical, highlighting blockers. Ensure response is valid JSON."
+        "Ensure the response is valid JSON and maps strictly to wentWell, didNotGoWell, averageSentiment, and actionItems."
     )
     
     user_content = {
@@ -257,8 +275,8 @@ async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[
         print(f"[JSON Parse Error in aggregate_retro]: {str(e)}")
         return {
             "summary": "Sprint Retro aggregated. Failed to generate detailed LLM report.",
-            "what_went_well": [],
-            "what_did_not_go_well": [],
-            "average_sentiment": 3.0,
-            "proposed_backlog_actions": []
+            "wentWell": [],
+            "didNotGoWell": [],
+            "averageSentiment": 3.0,
+            "actionItems": []
         }

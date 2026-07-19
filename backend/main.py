@@ -29,6 +29,7 @@ az_client = AzureDevOpsClient()
 # Schemas
 class MeetingCreate(BaseModel):
     title: str = Field(..., alias="meetingTitle")
+    projectKey: str = Field(default="")
     transcript: str
 
 class ItemUpdate(BaseModel):
@@ -67,6 +68,7 @@ def list_meetings():
 async def create_meeting(payload: MeetingCreate):
     meeting_id = str(uuid.uuid4())
     title = payload.title
+    project_key = payload.projectKey
     transcript = payload.transcript
     
     # 1. Summarization
@@ -78,6 +80,7 @@ async def create_meeting(payload: MeetingCreate):
     # Save base meeting
     db.create_meeting(
         id=meeting_id,
+        project_key=project_key,
         title=title,
         transcript=transcript,
         summary=summary,
@@ -106,13 +109,14 @@ async def create_meeting(payload: MeetingCreate):
             acceptance_criteria=item.get("acceptance_criteria", []),
             story_points=int(item.get("story_points", 3)),
             priority=int(item.get("priority", 3)),
-            approved=0,  # Starts as unapproved
+            approved=False,  # Starts as unapproved
             tags=item.get("tags", []),
             azure_id=None
         )
         
     return {
         "id": meeting_id,
+        "project_key": project_key,
         "title": title,
         "summary": summary,
         "decisions": decisions,
@@ -138,15 +142,13 @@ def update_meeting_items(meeting_id: str, payload: ItemUpdateList):
         
     results = []
     for item in payload.items:
-        # DB operates with 0/1 for approved
-        approved_int = 1 if item.approved else 0
         updated = db.update_item(
             id=item.id,
             title=item.title,
             description=item.description,
             story_points=item.story_points,
             priority=item.priority,
-            approved=approved_int,
+            approved=item.approved,
             tags=item.tags
         )
         if updated:
@@ -271,17 +273,39 @@ async def aggregate_retro_report(sprint_id: str, path: str):
         feedback_list = db.get_retro_feedback_for_sprint(sprint_id)
         
         # Execute LlM synthesis
-        report = await aggregate_retro(sprint_items, feedback_list)
+        llm_report = await aggregate_retro(sprint_items, feedback_list)
         
-        # Process and store report
+        # Extract fields from LLM response
+        summary_text = llm_report.get("summary", "")
+        went_well = llm_report.get("wentWell", [])
+        did_not_go_well = llm_report.get("didNotGoWell", [])
+        action_items = llm_report.get("actionItems", [])
+        average_sentiment = llm_report.get("averageSentiment", 3.0)
+        
+        # Calculate average sentiment from feedback if not provided by LLM
+        if feedback_list:
+            sentiments = [f["sentiment"] for f in feedback_list]
+            average_sentiment = sum(sentiments) / len(sentiments)
+        
+        # Save report
         db.save_retro_report(
             id=str(uuid.uuid4()),
             sprint_id=sprint_id,
-            summary=report,
-            proposed_items=report.get("proposed_backlog_actions", [])
+            summary=summary_text,
+            went_well=went_well,
+            did_not_go_well=did_not_go_well,
+            action_items=action_items,
+            average_sentiment=average_sentiment
         )
         
-        return report
+        # Return in frontend expected format
+        return {
+            "summary": summary_text,
+            "what_went_well": went_well,
+            "what_did_not_go_well": did_not_go_well,
+            "average_sentiment": average_sentiment,
+            "proposed_backlog_actions": action_items
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -298,7 +322,7 @@ async def push_retro_actions(sprint_id: str, payload: PushToAzureRequest):
     if not report:
         raise HTTPException(status_code=404, detail="No retro report found.")
         
-    actions = report.get("proposed_items", [])
+    actions = report.get("proposed_backlog_actions", [])
     if not actions:
         return {"message": "No actions to push.", "pushed_count": 0}
         
@@ -308,10 +332,10 @@ async def push_retro_actions(sprint_id: str, payload: PushToAzureRequest):
             # Assign standard tags to mark them as retro outcomes
             item_data = {
                 "title": action["title"],
-                "description": action["description"],
+                "description": action.get("description", ""),
                 "story_points": action.get("story_points", 2),
                 "priority": action.get("priority", 2),
-                "tags": action.get("tags", []) + ["retro-action"]
+                "tags": (action.get("tags", []) if isinstance(action.get("tags"), list) else []) + ["retro-action"]
             }
             res = await az_client.create_work_item(
                 item_type=action.get("type", "task"),
