@@ -523,6 +523,7 @@ export default function App() {
   const completedItems = sprintItems.filter(i => i.state === 'Closed' || i.state === 'Done');
   const completedCount = completedItems.length;
   const completionRate = sprintItems.length > 0 ? Math.round((completedCount / sprintItems.length) * 100) : 0;
+  const platformLabel = settings?.project_platform === 'jira' ? 'Jira' : 'Azure Boards';
 
   return (
     <div className="app-container">
@@ -728,7 +729,7 @@ export default function App() {
                         onClick={handlePushToAzure}
                         disabled={isPushing}
                       >
-                        {isPushing ? "Syncing..." : "Sync Approved to Azure Boards"}
+                        {isPushing ? "Syncing..." : `Sync Approved to ${platformLabel}`}
                       </button>
                     </div>
                   </div>
@@ -846,7 +847,7 @@ export default function App() {
               <div className="stat-val">{totalPoints} SP</div>
             </div>
             <div className="stat-widget">
-              <span className="stat-lbl">Azure Boards Link</span>
+              <span className="stat-lbl">{platformLabel} Link</span>
               <div className="stat-val" style={{ fontSize: '1rem', marginTop: '12px', color: 'var(--primary)', cursor: 'pointer' }}>Active Connect</div>
             </div>
           </div>
@@ -1002,7 +1003,7 @@ export default function App() {
                           style={{ padding: '4px 10px', fontSize: '0.8rem' }}
                           onClick={pushRetroActionsToAzure}
                         >
-                          Sync Actions to Azure Boards
+                          {`Sync Actions to ${platformLabel}`}
                         </button>
                       )}
                       {areActionsPushed && (

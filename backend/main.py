@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from database import Database
 from llm import summarize_meeting, extract_items, score_items, align_company_framework, aggregate_retro
 from azure_devops import AzureDevOpsClient
+from jira_client import JiraClient
 
 load_dotenv()
 
@@ -24,7 +25,16 @@ app.add_middleware(
 )
 
 db = Database()
-az_client = AzureDevOpsClient(db.get_settings())
+
+
+def get_pm_client():
+    settings = db.get_settings()
+    if settings.get("project_platform") == "jira":
+        return JiraClient(settings)
+    return AzureDevOpsClient(settings)
+
+
+az_client = get_pm_client()
 
 # Schemas
 class MeetingCreate(BaseModel):
@@ -187,6 +197,7 @@ def update_meeting_items(meeting_id: str, payload: ItemUpdateList):
     return {"status": "ok", "items": results}
 
 @app.post("/api/meetings/{meeting_id}/push-to-azure")
+@app.post("/api/meetings/{meeting_id}/push-to-platform")
 async def push_to_azure(meeting_id: str, payload: PushToAzureRequest):
     meeting = db.get_meeting(meeting_id)
     if not meeting:
@@ -235,12 +246,12 @@ async def push_to_azure(meeting_id: str, payload: PushToAzureRequest):
         db.update_meeting_status(meeting_id, "pushed")
         
     return {
-        "message": "Pushed approved items to Azure DevOps Boards",
+        "message": "Pushed approved items to the selected project management platform",
         "pushed_count": len([r for r in pushed_results if "azure_id" in r]),
         "results": pushed_results
     }
 
-# Azure DevOps Integration / Queries
+# Project Management Integration / Queries
 @app.get("/api/sprints")
 async def get_sprints():
     try:
@@ -299,8 +310,7 @@ def update_settings(payload: SettingsUpdate):
         
         # Reinitialize Azure DevOps client if project platform settings changed
         if any(k in settings_data for k in ["project_platform", "azure_org", "azure_project", "azure_pat", "jira_url", "jira_email", "jira_api_token", "jira_project_key"]):
-            from azure_devops import AzureDevOpsClient
-            az_client = AzureDevOpsClient(saved)
+            az_client = get_pm_client()
         
         return saved
     except Exception as e:
@@ -309,7 +319,7 @@ def update_settings(payload: SettingsUpdate):
 @app.post("/api/retro/{sprint_id}/aggregate")
 async def aggregate_retro_report(sprint_id: str, path: str, payload: RetroAggregateRequest = RetroAggregateRequest()):
     try:
-        # Fetch current items in that sprint from Azure
+        # Fetch current items in that sprint from the selected PM platform
         sprint_items = await az_client.get_sprint_work_items(iteration_path=path)
         
         # Load local comments/survey entries
@@ -363,6 +373,7 @@ def get_retro_report(sprint_id: str):
     return report
 
 @app.post("/api/retro/{sprint_id}/push-actions-to-azure")
+@app.post("/api/retro/{sprint_id}/push-actions-to-platform")
 async def push_retro_actions(sprint_id: str, payload: PushToAzureRequest):
     report = db.get_retro_report(sprint_id)
     if not report:
@@ -393,7 +404,7 @@ async def push_retro_actions(sprint_id: str, payload: PushToAzureRequest):
             print(f"[PUSH ERROR] Failed to push retro action: {str(e)}")
             
     return {
-        "message": f"Successfully pushed retro actions to Azure DevOps",
+        "message": "Successfully pushed retro actions to the selected project management platform",
         "pushed_count": len(pushed_results),
         "ids": pushed_results
     }
