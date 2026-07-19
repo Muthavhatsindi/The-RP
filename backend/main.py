@@ -24,7 +24,7 @@ app.add_middleware(
 )
 
 db = Database()
-az_client = AzureDevOpsClient()
+az_client = AzureDevOpsClient(db.get_settings())
 
 # Schemas
 class MeetingCreate(BaseModel):
@@ -51,6 +51,24 @@ class RetroFeedbackSubmit(BaseModel):
     user_id: str
     answers: Dict[str, Any]
     sentiment: float
+
+class RetroAggregateRequest(BaseModel):
+    coding_agent_logs: Optional[str] = None
+
+class SettingsUpdate(BaseModel):
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    ollama_base_url: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    project_platform: Optional[str] = None
+    azure_org: Optional[str] = None
+    azure_project: Optional[str] = None
+    azure_pat: Optional[str] = None
+    jira_url: Optional[str] = None
+    jira_email: Optional[str] = None
+    jira_api_token: Optional[str] = None
+    jira_project_key: Optional[str] = None
 
 @app.get("/api/health")
 def health_check():
@@ -263,8 +281,33 @@ def get_retro_feedback(sprint_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Settings Endpoints
+@app.get("/api/settings")
+def get_settings():
+    try:
+        return db.get_settings()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/settings")
+def update_settings(payload: SettingsUpdate):
+    try:
+        global az_client
+        # Convert payload to dict and save
+        settings_data = payload.dict(exclude_unset=True)
+        saved = db.save_settings(settings_data)
+        
+        # Reinitialize Azure DevOps client if project platform settings changed
+        if any(k in settings_data for k in ["project_platform", "azure_org", "azure_project", "azure_pat", "jira_url", "jira_email", "jira_api_token", "jira_project_key"]):
+            from azure_devops import AzureDevOpsClient
+            az_client = AzureDevOpsClient(saved)
+        
+        return saved
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/retro/{sprint_id}/aggregate")
-async def aggregate_retro_report(sprint_id: str, path: str):
+async def aggregate_retro_report(sprint_id: str, path: str, payload: RetroAggregateRequest = RetroAggregateRequest()):
     try:
         # Fetch current items in that sprint from Azure
         sprint_items = await az_client.get_sprint_work_items(iteration_path=path)
@@ -272,8 +315,8 @@ async def aggregate_retro_report(sprint_id: str, path: str):
         # Load local comments/survey entries
         feedback_list = db.get_retro_feedback_for_sprint(sprint_id)
         
-        # Execute LlM synthesis
-        llm_report = await aggregate_retro(sprint_items, feedback_list)
+        # Execute LlM synthesis with coding agent logs if provided
+        llm_report = await aggregate_retro(sprint_items, feedback_list, payload.coding_agent_logs)
         
         # Extract fields from LLM response
         summary_text = llm_report.get("summary", "")
@@ -281,6 +324,7 @@ async def aggregate_retro_report(sprint_id: str, path: str):
         did_not_go_well = llm_report.get("didNotGoWell", [])
         action_items = llm_report.get("actionItems", [])
         average_sentiment = llm_report.get("averageSentiment", 3.0)
+        coding_agent_logs_summary = llm_report.get("codingAgentLogsSummary", None)
         
         # Calculate average sentiment from feedback if not provided by LLM
         if feedback_list:
@@ -295,7 +339,8 @@ async def aggregate_retro_report(sprint_id: str, path: str):
             went_well=went_well,
             did_not_go_well=did_not_go_well,
             action_items=action_items,
-            average_sentiment=average_sentiment
+            average_sentiment=average_sentiment,
+            coding_agent_logs_summary=coding_agent_logs_summary
         )
         
         # Return in frontend expected format
@@ -304,7 +349,8 @@ async def aggregate_retro_report(sprint_id: str, path: str):
             "what_went_well": went_well,
             "what_did_not_go_well": did_not_go_well,
             "average_sentiment": average_sentiment,
-            "proposed_backlog_actions": action_items
+            "proposed_backlog_actions": action_items,
+            "coding_agent_logs_summary": coding_agent_logs_summary
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

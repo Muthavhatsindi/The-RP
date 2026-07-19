@@ -11,7 +11,7 @@ load_dotenv()
 
 # Determine database file path
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(DB_DIR, "database_v3.db")
+DB_FILE = os.path.join(DB_DIR, "database_v4.db")
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_FILE}")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
@@ -62,6 +62,25 @@ class RetroFeedback(Base):
     sentiment = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+class Settings(Base):
+    __tablename__ = "settings"
+
+    id = Column(String, primary_key=True, default="default")
+    llm_provider = Column(String, default="ollama", nullable=False)
+    llm_model = Column(String, default="llama3.1:8b", nullable=False)
+    ollama_base_url = Column(String, default="http://localhost:11434", nullable=False)
+    openai_api_key = Column(String, nullable=True)
+    openai_base_url = Column(String, default="https://api.openai.com/v1", nullable=False)
+    project_platform = Column(String, default="azure", nullable=False)  # "azure" or "jira"
+    azure_org = Column(String, nullable=True)
+    azure_project = Column(String, nullable=True)
+    azure_pat = Column(String, nullable=True)
+    jira_url = Column(String, nullable=True)
+    jira_email = Column(String, nullable=True)
+    jira_api_token = Column(String, nullable=True)
+    jira_project_key = Column(String, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
 class RetroReport(Base):
     __tablename__ = "retro_reports"
 
@@ -72,6 +91,7 @@ class RetroReport(Base):
     did_not_go_well = Column(JSON, nullable=False)   # List of strings
     action_items = Column(JSON, nullable=False)      # List of dicts representing proposed tasks
     average_sentiment = Column(Float, default=3.0, nullable=False)
+    coding_agent_logs_summary = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -199,7 +219,7 @@ class Database:
     # Retro Report Operations
     def save_retro_report(self, id: str, sprint_id: str, summary: str, went_well: List[str], 
                           did_not_go_well: List[str], action_items: List[Dict[str, Any]], 
-                          average_sentiment: float):
+                          average_sentiment: float, coding_agent_logs_summary: Optional[str] = None):
         with self.get_session() as session:
             # Upsert behavior matching SQLite constraint
             report = session.query(RetroReport).filter(RetroReport.sprint_id == sprint_id).first()
@@ -209,6 +229,7 @@ class Database:
                 report.did_not_go_well = did_not_go_well
                 report.action_items = action_items
                 report.average_sentiment = average_sentiment
+                report.coding_agent_logs_summary = coding_agent_logs_summary
             else:
                 report = RetroReport(
                     id=id,
@@ -217,7 +238,8 @@ class Database:
                     went_well=went_well,
                     did_not_go_well=did_not_go_well,
                     action_items=action_items,
-                    average_sentiment=average_sentiment
+                    average_sentiment=average_sentiment,
+                    coding_agent_logs_summary=coding_agent_logs_summary
                 )
                 session.add(report)
             session.commit()
@@ -278,5 +300,76 @@ class Database:
             "what_did_not_go_well": r.did_not_go_well if isinstance(r.did_not_go_well, list) else json.loads(r.did_not_go_well or "[]"),
             "average_sentiment": r.average_sentiment,
             "proposed_backlog_actions": r.action_items if isinstance(r.action_items, list) else json.loads(r.action_items or "[]"),
+            "coding_agent_logs_summary": r.coding_agent_logs_summary,
             "created_at": r.created_at.isoformat() if r.created_at else None
+        }
+
+    # Settings Operations
+    def get_settings(self) -> Dict[str, Any]:
+        with self.get_session() as session:
+            settings = session.query(Settings).filter(Settings.id == "default").first()
+            if not settings:
+                # Create default settings if none exist
+                settings = Settings()
+                session.add(settings)
+                session.commit()
+                session.refresh(settings)
+            return self._to_settings_dict(settings)
+
+    def save_settings(self, settings_data: Dict[str, Any]) -> Dict[str, Any]:
+        with self.get_session() as session:
+            settings = session.query(Settings).filter(Settings.id == "default").first()
+            if not settings:
+                settings = Settings()
+                session.add(settings)
+            
+            # Update fields from settings_data
+            if "llm_provider" in settings_data:
+                settings.llm_provider = settings_data["llm_provider"]
+            if "llm_model" in settings_data:
+                settings.llm_model = settings_data["llm_model"]
+            if "ollama_base_url" in settings_data:
+                settings.ollama_base_url = settings_data["ollama_base_url"]
+            if "openai_api_key" in settings_data:
+                settings.openai_api_key = settings_data["openai_api_key"]
+            if "openai_base_url" in settings_data:
+                settings.openai_base_url = settings_data["openai_base_url"]
+            if "project_platform" in settings_data:
+                settings.project_platform = settings_data["project_platform"]
+            if "azure_org" in settings_data:
+                settings.azure_org = settings_data["azure_org"]
+            if "azure_project" in settings_data:
+                settings.azure_project = settings_data["azure_project"]
+            if "azure_pat" in settings_data:
+                settings.azure_pat = settings_data["azure_pat"]
+            if "jira_url" in settings_data:
+                settings.jira_url = settings_data["jira_url"]
+            if "jira_email" in settings_data:
+                settings.jira_email = settings_data["jira_email"]
+            if "jira_api_token" in settings_data:
+                settings.jira_api_token = settings_data["jira_api_token"]
+            if "jira_project_key" in settings_data:
+                settings.jira_project_key = settings_data["jira_project_key"]
+                
+            session.commit()
+            session.refresh(settings)
+            return self._to_settings_dict(settings)
+
+    def _to_settings_dict(self, s: Settings) -> Dict[str, Any]:
+        return {
+            "id": s.id,
+            "llm_provider": s.llm_provider,
+            "llm_model": s.llm_model,
+            "ollama_base_url": s.ollama_base_url,
+            "openai_api_key": s.openai_api_key,
+            "openai_base_url": s.openai_base_url,
+            "project_platform": s.project_platform,
+            "azure_org": s.azure_org,
+            "azure_project": s.azure_project,
+            "azure_pat": s.azure_pat,
+            "jira_url": s.jira_url,
+            "jira_email": s.jira_email,
+            "jira_api_token": s.jira_api_token,
+            "jira_project_key": s.jira_project_key,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None
         }

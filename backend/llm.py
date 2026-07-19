@@ -1,18 +1,25 @@
-import os
 import json
 import re
 import httpx
 from typing import List, Dict, Any, Optional
-from dotenv import load_dotenv
+from database import Database
 
-load_dotenv()
+# Initialize database connection
+db = Database()
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-AZURE_PROJECT = os.getenv("AZURE_PROJECT", "MockProject")
+def get_settings():
+    return db.get_settings()
+
+def get_llm_config():
+    settings = get_settings()
+    return {
+        "provider": settings.get("llm_provider", "ollama").lower(),
+        "model": settings.get("llm_model", "llama3"),
+        "ollama_base_url": settings.get("ollama_base_url", "http://localhost:11434"),
+        "openai_api_key": settings.get("openai_api_key", ""),
+        "openai_base_url": settings.get("openai_base_url", "https://api.openai.com/v1"),
+        "azure_project": settings.get("azure_project") or settings.get("jira_project_key") or "MockProject"
+    }
 
 def clean_json_string(text: str) -> str:
     """Extracts JSON substring or parses loose formatting from the LLM output."""
@@ -38,17 +45,18 @@ def clean_json_string(text: str) -> str:
 
 async def call_llm(system_prompt: str, user_prompt: str, json_format: bool = True) -> str:
     """Calls Ollama or OpenAI based on current configuration settings."""
+    config = get_llm_config()
     try:
-        print(f"[DEBUG] LLM_PROVIDER: {LLM_PROVIDER}")
-        print(f"[DEBUG] LLM_MODEL: {LLM_MODEL}")
-        print(f"[DEBUG] OLLAMA_BASE_URL: {OLLAMA_BASE_URL}")
-        if LLM_PROVIDER == "openai":
+        print(f"[DEBUG] LLM_PROVIDER: {config['provider']}")
+        print(f"[DEBUG] LLM_MODEL: {config['model']}")
+        print(f"[DEBUG] OLLAMA_BASE_URL: {config['ollama_base_url']}")
+        if config["provider"] == "openai":
             headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Authorization": f"Bearer {config['openai_api_key']}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": LLM_MODEL if LLM_MODEL != "llama3" else "gpt-3.5-turbo",
+                "model": config["model"] if config["model"] != "llama3" else "gpt-3.5-turbo",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -58,14 +66,14 @@ async def call_llm(system_prompt: str, user_prompt: str, json_format: bool = Tru
                 payload["response_format"] = {"type": "json_object"}
             
             async with httpx.AsyncClient(timeout=60.0) as client:
-                res = await client.post(f"{OPENAI_BASE_URL}/chat/completions", json=payload, headers=headers)
+                res = await client.post(f"{config['openai_base_url']}/chat/completions", json=payload, headers=headers)
                 res.raise_for_status()
                 data = res.json()
                 return data["choices"][0]["message"]["content"]
                 
         else: # Default/Fallback to Ollama
             payload = {
-                "model": LLM_MODEL,
+                "model": config["model"],
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -80,14 +88,14 @@ async def call_llm(system_prompt: str, user_prompt: str, json_format: bool = Tru
                 
             print(f"[DEBUG] Ollama payload: {payload}")
             async with httpx.AsyncClient(timeout=60.0) as client:
-                res = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
+                res = await client.post(f"{config['ollama_base_url']}/api/chat", json=payload)
                 res.raise_for_status()
                 data = res.json()
                 print(f"[DEBUG] Ollama response: {data}")
                 return data["message"]["content"]
                 
     except Exception as e:
-        print(f"[LLM ERROR] Provider: {LLM_PROVIDER}, Error: {str(e)}")
+        print(f"[LLM ERROR] Provider: {config['provider']}, Error: {str(e)}")
         if json_format:
             return "{}"
         return "Failed to contact LLM provider."
@@ -206,12 +214,14 @@ async def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not items:
         return []
         
+    config = get_llm_config()
+    azure_project = config["azure_project"]
     system_prompt = (
         "You are an agile estimation assistant. "
         "Given a list of backlog items, assign Story Points (estimates of effort: 1, 2, 3, 5, 8, 13) "
         "and Priority (1 to 4, where 1 is highest priority).\n"
-        f"Also, propose a 'proposedIterationPath' (default to '{AZURE_PROJECT}\\\\Sprint 1' or another sprint name context like "
-        f"'{AZURE_PROJECT}\\\\Sprint 2' if appropriate based on timing mentioned in the meeting).\n"
+        f"Also, propose a 'proposedIterationPath' (default to '{azure_project}\\\\Sprint 1' or another sprint name context like "
+        f"'{azure_project}\\\\Sprint 2' if appropriate based on timing mentioned in the meeting).\n"
         "Provide your evaluation as a JSON list matching the input items list but appended with points, priority, and proposedIterationPath. "
         "Example format:\n"
         "{{\n"
@@ -224,7 +234,7 @@ async def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         '      "tags": ["tag"],\n'
         '      "story_points": 5,\n'
         '      "priority": 2,\n'
-        f'      "proposedIterationPath": "{AZURE_PROJECT}\\\\Sprint 1"\n'
+        f'      "proposedIterationPath": "{azure_project}\\\\Sprint 1"\n'
         "    }}\n"
         '  ]\n'
         "}}\n"
@@ -242,20 +252,23 @@ async def score_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             item["story_points"] = item.get("story_points", 3)
             item["priority"] = item.get("priority", 3)
             if "proposedIterationPath" not in item:
-                item["proposedIterationPath"] = item.get("proposed_iteration_path", f"{AZURE_PROJECT}\\Sprint 1")
+                item["proposedIterationPath"] = item.get("proposed_iteration_path", f"{azure_project}\\Sprint 1")
         return scored
     except Exception as e:
         print(f"[JSON Parse Error in score_items]: {str(e)}")
         for item in items:
             item["story_points"] = item.get("story_points", 3)
             item["priority"] = item.get("priority", 3)
-            item["proposedIterationPath"] = f"{AZURE_PROJECT}\\Sprint 1"
+            item["proposedIterationPath"] = f"{azure_project}\\Sprint 1"
         return items
 
 async def align_company_framework(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not items:
         return []
         
+    config = get_llm_config()
+    azure_project = config["azure_project"]
+    
     system_prompt = (
         "You are a compliance and formatting expert. "
         "Review each item in the list and ensure it aligns with standard Agile best practices:\n"
@@ -273,7 +286,7 @@ async def align_company_framework(items: List[Dict[str, Any]]) -> List[Dict[str,
         '      "tags": [...],\n'
         '      "story_points": 3,\n'
         '      "priority": 2,\n'
-        f'      "proposedIterationPath": "{AZURE_PROJECT}\\\\Sprint 1"\n'
+        f'      "proposedIterationPath": "{azure_project}\\\\Sprint 1"\n'
         "    }}\n"
         "  ]\n"
         "}}\n"
@@ -289,7 +302,7 @@ async def align_company_framework(items: List[Dict[str, Any]]) -> List[Dict[str,
         print(f"[JSON Parse Error in align_company_framework]: {str(e)}")
         return items
 
-async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[str, Any]], coding_agent_logs: Optional[str] = None) -> Dict[str, Any]:
     # Mock data for testing if LLM is not available
     mock_retro = {
         "summary": "Sprint 4 was mostly successful with some delays in OAuth integration. Team morale is good but there are concerns about deployment pipeline stability.",
@@ -321,18 +334,21 @@ async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[
                 "priority": 2,
                 "tags": ["retro-action", "process"]
             }
-        ]
+        ],
+        "codingAgentLogsSummary": coding_agent_logs or "No coding agent logs provided"
     }
     
     system_prompt = (
         "You are an agile consultant running a sprint retrospective. "
-        "You will receive data about sprint completion statistics along with raw employee sentiment feedback.\n"
+        "You will receive data about sprint completion statistics, raw employee sentiment feedback, "
+        "and optionally coding agent session logs that show the developer's interaction with AI coding assistants during the sprint.\n"
         "Analyze these datasets and output a JSON response containing standard retro sections:\n"
         "{\n"
         '  "wentWell": ["Success item 1", "Success item 2"],\n'
         '  "didNotGoWell": ["Blocked item 1", "Blocked item 2"],\n'
-        '  "summary": "General summary of sprint performance",\n'
+        '  "summary": "General summary of sprint performance including insights from coding agent logs if provided",\n'
         '  "averageSentiment": 4.0,\n'
+        '  "codingAgentLogsSummary": "A summary of insights from the coding agent logs (if provided, otherwise empty string)",\n'
         '  "actionItems": [\n'
         "    {\n"
         '      "type": "task",\n'
@@ -344,13 +360,15 @@ async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[
         "    }\n"
         "  ]\n"
         "}\n"
-        "Ensure the response is valid JSON and maps strictly to wentWell, didNotGoWell, averageSentiment, and actionItems."
+        "Ensure the response is valid JSON and maps strictly to wentWell, didNotGoWell, averageSentiment, codingAgentLogsSummary, and actionItems."
     )
     
     user_content = {
         "sprint_work_items": sprint_data,
         "team_feedback": feedback_list
     }
+    if coding_agent_logs:
+        user_content["coding_agent_logs"] = coding_agent_logs
     
     user_prompt = f"Sprint Data and Team Feedbacks:\n{json.dumps(user_content, indent=2)}"
     
@@ -362,6 +380,8 @@ async def aggregate_retro(sprint_data: Dict[str, Any], feedback_list: List[Dict[
         # Check if we got valid data with required fields
         required_fields = ["summary", "wentWell", "didNotGoWell", "averageSentiment", "actionItems"]
         if data and all(field in data for field in required_fields):
+            if "codingAgentLogsSummary" not in data:
+                data["codingAgentLogsSummary"] = coding_agent_logs or "No coding agent logs provided"
             return data
         else:
             print(f"[LLM Warning in aggregate_retro]: Got invalid data, using mock")

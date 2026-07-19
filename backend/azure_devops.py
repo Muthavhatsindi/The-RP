@@ -16,10 +16,13 @@ STORY_TYPE = os.getenv("AZURE_STORY_TYPE", "User Story")
 TASK_TYPE = os.getenv("AZURE_TASK_TYPE", "Task")
 
 class AzureDevOpsClient:
-    def __init__(self):
-        self.org = AZURE_ORGANIZATION
-        self.project = AZURE_PROJECT
-        self.pat = AZURE_PAT
+    def __init__(self, settings: Optional[Dict[str, Any]] = None):
+        settings = settings or {}
+        platform = settings.get("project_platform", "azure")
+
+        self.org = settings.get("azure_org") or AZURE_ORGANIZATION
+        self.project = settings.get("azure_project") or AZURE_PROJECT
+        self.pat = settings.get("azure_pat") or AZURE_PAT
         self.api_version = AZURE_API_VERSION
         
         # Check if we should operate in simulation/mock mode
@@ -28,7 +31,9 @@ class AzureDevOpsClient:
         self.project = self.project if self.project not in ("", "your_project_name") else ""
         self.pat = self.pat if self.pat not in ("", "your_personal_access_token_here") else ""
         
-        self.mock_mode = not (self.org and self.project and self.pat)
+        # If a non-Azure platform is selected, keep the client in mock mode so the
+        # rest of the app still works without trying to call Azure endpoints.
+        self.mock_mode = platform != "azure" or not (self.org and self.project and self.pat)
         if self.mock_mode:
             print("[AZURE DEVOPS] Operating in MOCK MODE because organization/project/PAT variables are not fully configured.")
         else:

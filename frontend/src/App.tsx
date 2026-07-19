@@ -49,6 +49,23 @@ interface RetroReport {
   what_did_not_go_well: string[];
   average_sentiment: number;
   proposed_backlog_actions: any[];
+  coding_agent_logs_summary?: string;
+}
+
+interface Settings {
+  llm_provider: string;
+  llm_model: string;
+  ollama_base_url: string;
+  openai_api_key?: string;
+  openai_base_url: string;
+  project_platform: string;
+  azure_org?: string;
+  azure_project?: string;
+  azure_pat?: string;
+  jira_url?: string;
+  jira_email?: string;
+  jira_api_token?: string;
+  jira_project_key?: string;
 }
 
 // Preset Transcript Samples
@@ -75,7 +92,7 @@ Dev (Dave): That's a task. 1 story point. Priority 2.`
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'meetings' | 'retro'>('meetings');
+  const [activeTab, setActiveTab] = useState<'meetings' | 'retro' | 'settings'>('meetings');
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
   const [selectedMeeting, setSelectedMeeting] = useState<Meeting | null>(null);
@@ -109,11 +126,17 @@ export default function App() {
   const [isAggregatingRetro, setIsAggregatingRetro] = useState(false);
   const [retroReport, setRetroReport] = useState<RetroReport | null>(null);
   const [areActionsPushed, setAreActionsPushed] = useState(false);
+  const [codingAgentLogs, setCodingAgentLogs] = useState('');
+
+  // Settings State
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   // Fetch initial list on load
   useEffect(() => {
     fetchMeetings();
     fetchSprints();
+    fetchSettings();
   }, []);
 
   useEffect(() => {
@@ -128,6 +151,42 @@ export default function App() {
       fetchExistingRetroReport();
     }
   }, [selectedSprint]);
+
+  const fetchSettings = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/settings`);
+      if (!res.ok) {
+        console.error("Failed to fetch settings:", res.statusText);
+        return;
+      }
+      const data = await res.json();
+      setSettings(data);
+    } catch (e) {
+      console.error("Error fetching settings:", e);
+    }
+  };
+
+  const saveSettings = async () => {
+    if (!settings) return;
+    setIsSavingSettings(true);
+    try {
+      const res = await fetch(`${API_URL}/api/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      if (res.ok) {
+        alert("Settings saved successfully!");
+      } else {
+        alert("Failed to save settings.");
+      }
+    } catch (e) {
+      console.error("Error saving settings:", e);
+      alert("Failed to save settings.");
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
 
   const fetchMeetings = async () => {
     try {
@@ -413,7 +472,9 @@ export default function App() {
     setIsAggregatingRetro(true);
     try {
       const res = await fetch(`${API_URL}/api/retro/${sprint.id}/aggregate?path=${encodeURIComponent(sprint.path)}`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ coding_agent_logs: codingAgentLogs || null })
       });
       const data = await res.json();
       setRetroReport(data);
@@ -488,6 +549,12 @@ export default function App() {
             onClick={() => setActiveTab('retro')}
           >
             Sprint Retro Analytics
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            Settings / Integrations
           </button>
         </nav>
       </header>
@@ -737,10 +804,10 @@ export default function App() {
           </main>
 
         </div>
-      ) : (
+      ) : activeTab === 'retro' ? (
         
         // RETRO intelligence TAB PAGE
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', padding: '2rem' }}>
           
           {/* Sprint Settings Selector */}
           <div className="panel-card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
@@ -826,6 +893,16 @@ export default function App() {
                 </div>
                 
                 <div className="form-group">
+                  <label className="form-label">Coding Agent Session Logs (Optional)</label>
+                  <textarea 
+                    className="form-textarea" 
+                    placeholder="Paste your coding agent session logs here..." 
+                    style={{ minHeight: '100px' }}
+                    value={codingAgentLogs}
+                    onChange={(e) => setCodingAgentLogs(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
                   <label className="form-label">Active Sprint Sentiment (1-5)</label>
                   <div className="sentiment-selector">
                     <input 
@@ -885,6 +962,13 @@ export default function App() {
                       <h3>Sprint Summary</h3>
                       <p>{retroReport.summary}</p>
                       
+                      {retroReport.coding_agent_logs_summary && (
+                        <>
+                          <h3>Coding Agent Logs Summary</h3>
+                          <p>{retroReport.coding_agent_logs_summary}</p>
+                        </>
+                      )}
+                      
                       <h3>What Went Well</h3>
                       <ul>
                         {retroReport.what_went_well?.map((item: string, i: number) => (
@@ -938,148 +1022,312 @@ export default function App() {
                         retroReport.proposed_backlog_actions?.map((act: any, idx: number) => (
                           <div key={idx} className="retro-list-item">
                             <div className="retro-list-item-header">
-                              <span className="retro-list-item-title">{act.title}</span>
-                              <span className="type-indicator type-task" style={{ fontSize: '0.65rem', padding: '1px 6px' }}>{act.type}</span>
+                              <span className={`type-indicator type-${act.type}`}>{act.type}</span>
+                              <h5>{act.title}</h5>
+                              <div className="meta-estimates" style={{ marginLeft: 'auto' }}>
+                                <div className="meta-item">SP: <strong>{act.story_points}</strong></div>
+                                <div className="meta-item">Priority: <strong>{act.priority}</strong></div>
+                              </div>
                             </div>
-                            <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '4px' }}>{act.description}</p>
-                            
-                            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '6px', fontSize: '0.72rem', color: 'var(--text-tint)' }}>
-                              <div>Points: <strong>{act.story_points || 'N/A'}</strong></div>
-                              <div>Priority: <strong>{act.priority || 2}</strong></div>
+                            <p className="retro-item-desc">{act.description}</p>
+                            <div className="meta-tags" style={{ marginTop: '8px' }}>
+                              {act.tags?.map((tag: string, t: number) => (
+                                <span key={t} className="meta-tag">{tag}</span>
+                              ))}
                             </div>
                           </div>
                         ))
                       )}
                     </div>
                   </div>
-
                 </div>
               ) : (
-                <div style={{ textAlign: 'center', padding: '6rem 2rem', color: 'var(--text-muted)', fontSize: '0.9rem', flex: 1, display: 'grid', placeItems: 'center' }}>
-                  <p>Click "Generate Retro Report" above to trigger aggregate AI synthesis of boards metrics and surveys.</p>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+                  Generate a retrospective report to see AI-synthesized insights and proposed actions.
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      ) : (
+        // SETTINGS TAB PAGE
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', padding: '2rem' }}>
+          <div className="panel-card" style={{ maxWidth: '800px', margin: '0 auto' }}>
+            <h3 className="panel-title">LLM Configuration</h3>
+            {settings && (
+              <>
+                <div className="form-group">
+                  <label className="form-label">LLM Provider</label>
+                  <select 
+                    className="form-select" 
+                    value={settings.llm_provider}
+                    onChange={(e) => setSettings({ ...settings, llm_provider: e.target.value })}
+                  >
+                    <option value="ollama">Ollama (Local)</option>
+                    <option value="openai">OpenAI</option>
+                  </select>
+                </div>
 
+                {settings.llm_provider === 'ollama' && (
+                  <>
+                    <div className="form-group">
+                      <label className="form-label">Ollama Model</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="llama3.1:8b, deepseek-r1:7b, etc." 
+                        value={settings.llm_model}
+                        onChange={(e) => setSettings({ ...settings, llm_model: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Ollama Base URL</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="http://localhost:11434" 
+                        value={settings.ollama_base_url}
+                        onChange={(e) => setSettings({ ...settings, ollama_base_url: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {settings.llm_provider === 'openai' && (
+                  <>
+                    <div className="form-group">
+                      <label className="form-label">OpenAI Model</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="gpt-3.5-turbo, gpt-4, etc." 
+                        value={settings.llm_model}
+                        onChange={(e) => setSettings({ ...settings, llm_model: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">OpenAI API Key</label>
+                      <input 
+                        type="password" 
+                        className="form-input" 
+                        placeholder="sk-..." 
+                        value={settings.openai_api_key || ''}
+                        onChange={(e) => setSettings({ ...settings, openai_api_key: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">OpenAI Base URL (Optional, for compatible APIs)</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="https://api.openai.com/v1" 
+                        value={settings.openai_base_url}
+                        onChange={(e) => setSettings({ ...settings, openai_base_url: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+              </>
+            )}
           </div>
 
-          {/* Active Sprint backlog tickets log */}
-          <div className="panel-card">
-            <h3 className="panel-title">Active Sprint Backlog Sync (Azure Boards)</h3>
-            <div style={{ overflowX: 'auto' }}>
-              {sprintItems.length === 0 ? (
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', padding: '1rem 0' }}>No sprint tickets found or synced from Azure Boards.</p>
-              ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem', textHeading: 'left' }}>
-                  <thead>
-                    <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left', color: 'var(--text-tint)' }}>
-                      <th style={{ padding: '8px' }}>ID</th>
-                      <th style={{ padding: '8px' }}>Title</th>
-                      <th style={{ padding: '8px' }}>Type</th>
-                      <th style={{ padding: '8px' }}>State</th>
-                      <th style={{ padding: '8px', textAlign: 'right' }}>Effort (SP)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sprintItems.map(item => (
-                      <tr key={item.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                        <td style={{ padding: '10px 8px', color: 'var(--text-tint)' }}>#{item.id}</td>
-                        <td style={{ padding: '10px 8px', fontWeight: 500 }}>{item.title}</td>
-                        <td style={{ padding: '10px 8px' }}>
-                          <span className={`type-indicator type-${item.type.toLowerCase().includes('feature') ? 'feature' : item.type.toLowerCase().includes('task') ? 'task' : 'story'}`} style={{ fontSize: '0.68rem', padding: '2px 6px' }}>
-                            {item.type}
-                          </span>
-                        </td>
-                        <td style={{ padding: '10px 8px' }}>
-                          <span className={`state-badge ${item.state === 'Closed' || item.state === 'Done' ? 'state-badge-closed' : 'state-badge-active'}`}>
-                            {item.state}
-                          </span>
-                        </td>
-                        <td style={{ padding: '10px 8px', textAlign: 'right', fontWeight: 600 }}>{item.story_points || 0}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
+          <div className="panel-card" style={{ maxWidth: '800px', margin: '0 auto' }}>
+            <h3 className="panel-title">Project Management Integration</h3>
+            {settings && (
+              <>
+                <div className="form-group">
+                  <label className="form-label">Project Platform</label>
+                  <select 
+                    className="form-select" 
+                    value={settings.project_platform}
+                    onChange={(e) => setSettings({ ...settings, project_platform: e.target.value })}
+                  >
+                    <option value="azure">Azure DevOps Boards</option>
+                    <option value="jira">Jira (Coming Soon)</option>
+                  </select>
+                </div>
 
+                {settings.project_platform === 'azure' && (
+                  <>
+                    <div className="form-group">
+                      <label className="form-label">Azure DevOps Organization</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="your-organization" 
+                        value={settings.azure_org || ''}
+                        onChange={(e) => setSettings({ ...settings, azure_org: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Azure DevOps Project</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="your-project" 
+                        value={settings.azure_project || ''}
+                        onChange={(e) => setSettings({ ...settings, azure_project: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Azure DevOps Personal Access Token (PAT)</label>
+                      <input 
+                        type="password" 
+                        className="form-input" 
+                        placeholder="your-pat" 
+                        value={settings.azure_pat || ''}
+                        onChange={(e) => setSettings({ ...settings, azure_pat: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {settings.project_platform === 'jira' && (
+                  <>
+                    <div className="form-group">
+                      <label className="form-label">Jira URL</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="https://your-domain.atlassian.net" 
+                        value={settings.jira_url || ''}
+                        onChange={(e) => setSettings({ ...settings, jira_url: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Jira Email</label>
+                      <input 
+                        type="email" 
+                        className="form-input" 
+                        placeholder="you@example.com" 
+                        value={settings.jira_email || ''}
+                        onChange={(e) => setSettings({ ...settings, jira_email: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Jira API Token</label>
+                      <input 
+                        type="password" 
+                        className="form-input" 
+                        placeholder="your-api-token" 
+                        value={settings.jira_api_token || ''}
+                        onChange={(e) => setSettings({ ...settings, jira_api_token: e.target.value })}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Jira Project Key</label>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        placeholder="PROJ" 
+                        value={settings.jira_project_key || ''}
+                        onChange={(e) => setSettings({ ...settings, jira_project_key: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            <button 
+              className="btn btn-primary" 
+              style={{ width: '100%', marginTop: '1rem' }}
+              onClick={saveSettings}
+              disabled={isSavingSettings}
+            >
+              {isSavingSettings ? "Saving Settings..." : "Save Settings"}
+            </button>
+          </div>
         </div>
       )}
-
-      {/* BACKLOG ITEM EDIT DETAIL MODAL OVERLAY */}
+      
+      {/* Modal for editing items */}
       {editingItem && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <header className="modal-header">
-              <h3>Edit Backlog Candidate</h3>
-              <button className="modal-close-btn" onClick={() => setEditingItem(null)}>&times;</button>
-            </header>
-            
-            <div className="modal-body">
-              <div className="form-group">
-                <label className="form-label">Item Title</label>
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            backgroundColor: 'var(--bg-card)',
+            padding: '2rem',
+            borderRadius: '12px',
+            width: '500px',
+            maxWidth: '90%'
+          }}>
+            <h4 style={{ marginBottom: '1.25rem' }}>Edit Backlog Item</h4>
+            <div className="form-group">
+              <label className="form-label">Title</label>
+              <input 
+                type="text" 
+                className="form-input" 
+                value={editTitle}
+                onChange={(e) => setEditTitle(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Description</label>
+              <textarea 
+                className="form-textarea" 
+                style={{ minHeight: '100px' }}
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '1rem' }}>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label">Story Points</label>
                 <input 
-                  type="text" 
+                  type="number" 
                   className="form-input" 
-                  value={editTitle}
-                  onChange={(e) => setEditTitle(e.target.value)}
+                  value={editPoints}
+                  onChange={(e) => setEditPoints(Number(e.target.value))}
                 />
               </div>
-
-              <div className="form-group">
-                <label className="form-label">Task Description</label>
-                <textarea 
-                  className="form-textarea" 
-                  value={editDescription}
-                  onChange={(e) => setEditDescription(e.target.value)}
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="form-group">
-                  <label className="form-label">Story Points (Effort)</label>
-                  <select 
-                    className="form-select" 
-                    value={editPoints}
-                    onChange={(e) => setEditPoints(Number(e.target.value))}
-                  >
-                    {[1, 2, 3, 5, 8, 13].map(pt => (
-                      <option key={pt} value={pt}>{pt} SP</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Relative Priority</label>
-                  <select 
-                    className="form-select" 
-                    value={editPriority}
-                    onChange={(e) => setEditPriority(Number(e.target.value))}
-                  >
-                    {[1, 2, 3, 4].map(pr => (
-                      <option key={pr} value={pr}>Priority {pr}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Scope Tags (Comma-separated)</label>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label">Priority (1-4)</label>
                 <input 
-                  type="text" 
+                  type="number" 
+                  min="1" 
+                  max="4" 
                   className="form-input" 
-                  placeholder="frontend, database, api"
-                  value={editTags}
-                  onChange={(e) => setEditTags(e.target.value)}
+                  value={editPriority}
+                  onChange={(e) => setEditPriority(Number(e.target.value))}
                 />
               </div>
             </div>
-            
-            <footer className="modal-footer">
-              <button className="btn btn-secondary" onClick={() => setEditingItem(null)}>Cancel</button>
-              <button className="btn btn-primary" onClick={saveEditedItem}>Save Modifications</button>
-            </footer>
+            <div className="form-group">
+              <label className="form-label">Tags (comma separated)</label>
+              <input 
+                type="text" 
+                className="form-input" 
+                value={editTags}
+                onChange={(e) => setEditTags(e.target.value)}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '1.25rem' }}>
+              <button 
+                className="btn btn-secondary" 
+                style={{ flex: 1 }}
+                onClick={() => setEditingItem(null)}
+              >
+                Cancel
+              </button>
+              <button 
+                className="btn btn-primary" 
+                style={{ flex: 1 }}
+                onClick={saveEditedItem}
+              >
+                Save Changes
+              </button>
+            </div>
           </div>
         </div>
       )}
