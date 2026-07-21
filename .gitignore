@@ -4,3 +4,12 @@ Plan.md
 */__pycache__
 /.venv
 */node_modules
+.agents/
+.agent/
+narakeet_pack
+*/capture_narakeet_pack.mjs
+TTSOL-*
+harness/
+script.md
+system.md
+Plan.md
